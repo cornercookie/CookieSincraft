@@ -8,24 +8,17 @@ mod cpu;
 mod gpu;
 mod upscaler;
 
-use crate::commands::*;
-
-// Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+use crate::commands::{AppState, cancel_job, convert_image, export_image, load_image, select_image, select_save_path, upscale};
 
 fn main() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::new())
         .setup(|app| {
-            #[cfg(debug_assertions)] // only enable DevTools in debug build
+            #[cfg(debug_assertions)]
             app.get_webview_window("main").unwrap().open_devtools();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            greet,
             select_image,
             select_save_path,
             load_image,

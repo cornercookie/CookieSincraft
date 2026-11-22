@@ -5,7 +5,7 @@
  * backend receives real absolute paths (Tauri 2 does not expose paths
  * from <input type="file"> or drag-and-drop File objects).
  */
-import { invoke, convertFileSrc } from "@tauri-apps/api/core"
+import { invoke, Channel } from "@tauri-apps/api/core"
 
 const $ = (id) => document.getElementById(id)
 
@@ -42,6 +42,7 @@ const ALGORITHMS = {
 let currentFile = null   // { path, name }
 let currentJobId = null
 let outputPath = null
+let upscaleChannel = null
 
 // ---- Utils ----
 function setStatus(msg, kind = "muted") {
@@ -59,6 +60,7 @@ function setProgress(pct) {
 function resetJob() {
   currentJobId = null
   outputPath = null
+  upscaleChannel = null
   setProgress(0)
   setStatus("Idle")
   btnStart.disabled = false
@@ -219,35 +221,74 @@ btnStart.addEventListener("click", async () => {
   }
 
   try {
-    const result = await invoke("upscale", payload)
-    if (!result.job_id) throw new Error("upscale returned no job id")
-    currentJobId = result.job_id
+    // Create a Channel for progress events
+    upscaleChannel = new Channel()
 
-    btnStart.disabled = true
-    btnCancel.disabled = false
-    btnExport.disabled = true
-    setProgress(0)
-    setStatus("Upscaling…", "warn")
-
-    // Simulated progress (Rust side does not stream progress yet)
-    let pct = 0
-    const timer = setInterval(() => {
-      pct += 13
-      if (pct >= 100) {
-        pct = 100
-        clearInterval(timer)
-        setStatus("Upscale complete.", "ok")
-        btnStart.disabled = false
-        btnCancel.disabled = true
-        btnExport.disabled = false
-      } else {
-        setStatus("Upscaling… (" + pct + "%)", "warn")
+    // Listen for progress events from the backend
+    upscaleChannel.onmessage = (event) => {
+      const data = event.data
+      switch (data.event) {
+        case "Started":
+          currentJobId = data.job_id
+          break
+        case "Progress":
+          setProgress(data.percent)
+          setStatus(data.message, "warn")
+          break
+        case "Completed":
+          currentJobId = null
+          upscaleChannel = null
+          setProgress(100)
+          if (data.result.used_fallback && data.result.fallback_reason) {
+            setStatus(`Upscale complete (GPU fallback: ${data.result.fallback_reason})`, "ok")
+          } else {
+            setStatus("Upscale complete.", "ok")
+          }
+          btnStart.disabled = false
+          btnCancel.disabled = true
+          btnExport.disabled = false
+          break
+        case "Cancelled":
+          currentJobId = null
+          upscaleChannel = null
+          setProgress(0)
+          setStatus("Cancelled", "warn")
+          btnStart.disabled = false
+          btnCancel.disabled = true
+          btnExport.disabled = true
+          break
+        case "Failed":
+          currentJobId = null
+          upscaleChannel = null
+          setProgress(0)
+          setStatus("Failed: " + data.error, "err")
+          btnStart.disabled = false
+          btnCancel.disabled = true
+          btnExport.disabled = true
+          break
       }
-      setProgress(pct)
-    }, 350)
+    }
+
+    // Start the upscale with the channel
+    const result = await invoke("upscale", {
+      job: {
+        input_path: currentFile.path,
+        output_path: generateOutputPath(currentFile.path),
+        backend: backendSelect.value,
+        algorithm: algorithmSelect.value,
+        target_width: width,
+        target_height: height,
+        jpeg_quality: Number(qualityInput.value) || undefined,
+      },
+      onEvent: upscaleChannel,
+    })
+
+    // The Channel handles all progress, so we don't need to do anything here
+    // The onmessage handler will process the Completed event
   } catch (err) {
     console.error("Upscale error:", err)
     setStatus("Upscale failed: " + String(err), "err")
+    resetJob()
   }
 })
 
@@ -259,7 +300,7 @@ btnCancel.addEventListener("click", async () => {
   } catch (err) {
     console.error(err)
   }
-  resetJob()
+  // resetJob will be called when the Cancelled event arrives
 })
 
 // ---- Export (Save As) ----

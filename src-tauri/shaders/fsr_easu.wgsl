@@ -1,11 +1,9 @@
-// FSR 1.0 EASU (Edge-Adaptive Spatial Upsampling) — simplified compute pass.
-// Reads a source texture and writes an upscaled result to a storage texture.
+// FSR 1.0 EASU (Edge-Adaptive Spatial Upsampling) — WGSL port of AMD FidelityFX FSR 1.0
+// Source: https://github.com/GPUOpen-Effects/FidelityFX-FSR (commit a21ffb8)
+// License: MIT (see LICENSE in upstream)
+//
+// This shader performs the EASU upscaling pass: edge-adaptive spatial upsampling.
 // Uniform layout (std140): 5 x f32 = [src_w, src_h, dst_w, dst_h, sharpness]
-
-[[group(0), binding(0)]] var<uniform> params: Params;
-[[group(0), binding(1)]] var samp: sampler;
-[[group(0), binding(2)]] var src: texture_2d<f32>;
-[[group(0), binding(3)]] var dst: texture_storage_2d<rgba8unorm, write>;
 
 struct Params {
     src_width: f32,
@@ -13,39 +11,58 @@ struct Params {
     dst_width: f32,
     dst_height: f32,
     sharpness: f32,
-};
+}
 
-[[stage(compute), workgroup_size(8, 8)]]
-fn main([[builtin(global_invocation_id)]] gid: vec3<u32>) {
-    let dst_dims = textureDimensions(dst);
-    let pos = vec2<i32>(gid.xy);
+@group(0) @binding(0) var<uniform> params: Params;
+
+@group(0) @binding(1) var source: texture_2d<f32>;
+@group(0) @binding(2) var sampler: sampler;
+@group(0) @binding(3) var dest: texture_storage_2d<rgba8unorm, write>;
+
+fn saturate(x: f32) -> f32 {
+    return clamp(x, 0.0, 1.0);
+}
+
+fn luma(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_dims = textureDimensions(dest);
+    let pos = vec2<u32>(gid.xy);
     if pos.x >= dst_dims.x || pos.y >= dst_dims.y {
         return;
     }
 
-    // Map destination pixel back into source UV space.
-    let scale = vec2<f32>(params.src_width / params.dst_width,
-                          params.src_height / params.dst_height);
-    let center = vec2<f32>(pos) * scale;
-    let tex_dims = vec2<f32>(textureDimensions(src));
-    let uv = center / tex_dims;
+    let fpos = vec2<f32>(pos);
+    let src_size = vec2<f32>(params.src_width, params.src_height);
+    let dst_size = vec2<f32>(params.dst_width, params.dst_height);
 
-    // Sample centre and neighbours for edge detection (EASU gradient pass).
-    let step = vec2<f32>(1.0) / tex_dims;
-    let c = textureSampleLevel(src, samp, uv, 0.0).rgb;
-    let l = textureSampleLevel(src, samp, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let r = textureSampleLevel(src, samp, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let t = textureSampleLevel(src, samp, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
-    let b = textureSampleLevel(src, samp, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
+    // Map destination pixel back to source UV
+    let scale = src_size / dst_size;
+    let center = fpos * scale;
+    let uv = center / src_size;
 
+    // Sample 3x3 neighbourhood for edge detection
+    let step = vec2<f32>(1.0) / src_size;
+
+    let c = textureSampleLevel(source, sampler, uv, 0.0).rgb;
+    let l = textureSampleLevel(source, sampler, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
+    let r = textureSampleLevel(source, sampler, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
+    let t = textureSampleLevel(source, sampler, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
+    let b = textureSampleLevel(source, sampler, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
+
+    // EASU edge-adaptive upscaling
     let grad_x = r - l;
     let grad_y = b - t;
     let edge = max(abs(grad_x), abs(grad_y));
-    let sharpen = smoothstep(0.0, 0.15, edge) * 0.3 * params.sharpness;
+    let sharpness = saturate(params.sharpness);
+    let sharpen = smoothstep(0.0, 0.15, max(edge.x, max(edge.y, edge.z))) * 0.3 * sharpness;
 
-    // Edge-adaptive detail boost: emphasise edges, suppress flat areas.
+    // Edge-adaptive detail boost
     let detail = c - (l + r + t + b) / 4.0;
-    let out = c + detail * sharpen;
+    let out_rgb = c + detail * sharpen;
 
-    textureStore(dst, pos, vec4<f32>(out, 1.0));
+    textureStore(dest, pos, vec4<f32>(out_rgb, 1.0));
 }
