@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CookieSincraft — Image Upscaler</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="header">
+            <div class="brand">CookieSincraft</div>
+            <div class="subtitle">曲奇芯刻 · Image Upscaler</div>
+        </header>
+
+        <main class="container">
+            <!-- Left column: controls -->
+            <section class="panel controls">
+                <h2>Upload</h2>
+                <div class="drop-zone" id="dropZone">
+                    <p class="drop-hint">Drag &amp; drop an image here, or click to browse</p>
+                    <input type="file" id="fileInput" accept="image/*" class="file-input" hidden>
+                </div>
+                <div class="file-name" id="fileName">No file selected</div>
+
+                <h2>Backend</h2>
+                <div class="field">
+                    <label for="backend">Processing backend</label>
+                    <select id="backend" class="select">
+                        <option value="cpu">CPU</option>
+                        <option value="gpu">GPU</option>
+                    </select>
+                </div>
+
+                <h2>Algorithm</h2>
+                <div class="field">
+                    <label for="algorithm">Upscale algorithm</label>
+                    <select id="algorithm" class="select">
+                        <option value="Nearest">Nearest</option>
+                        <option value="Bilinear">Bilinear</option>
+                        <option value="CatmullRom">CatmullRom</option>
+                        <option value="Lanczos3">Lanczos3</option>
+                    </select>
+                </div>
+
+                <h2>Target resolution</h2>
+                <div class="field">
+                    <label for="resolution">Output size</label>
+                    <select id="resolution" class="select">
+                        <option value="3840x2160" selected>3840 × 2160 (4K UHD)</option>
+                        <option value="1920x1080">1920 × 1080 (FHD)</option>
+                        <option value="2560x1440">2560 × 1440 (QHD)</option>
+                        <option value="7680x4320">7680 × 4320 (8K UHD)</option>
+                    </select>
+                </div>
+
+                <h2>JPEG quality</h2>
+                <div class="field">
+                    <div class="slider-row">
+                        <input type="range" id="quality" min="50" max="100" value="85" class="slider">
+                        <span id="qualityValue">85</span>
+                    </div>
+                    <small class="muted">50 − 100</small>
+                </div>
+
+                <div class="actions">
+                    <button id="btnStart" class="btn btn-primary">Start Upscale</button>
+                    <button id="btnCancel" class="btn btn-secondary" disabled>Cancel</button>
+                    <button id="btnExport" class="btn btn-outline" disabled>Export (Save As…)</button>
+                </div>
+
+                <h2>Convert (Format)</h2>
+                <div class="field">
+                    <label for="convertFormat">Output format</label>
+                    <select id="convertFormat" class="select">
+                        <option value="png">PNG (lossless)</option>
+                        <option value="jpeg">JPEG</option>
+                        <option value="webp">WebP</option>
+                        <option value="gif">GIF</option>
+                        <option value="tiff">TIFF</option>
+                        <option value="bmp">BMP</option>
+                        <option value="ico">ICO</option>
+                        <option value="pnm">PNM</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="convertQuality">JPEG quality</label>
+                    <div class="slider-row">
+                        <input type="range" id="convertQuality" min="50" max="100" value="85" class="slider">
+                        <span id="convertQualityValue">85</span>
+                    </div>
+                    <small class="muted">50 − 100 (only applies to JPEG)</small>
+                </div>
+                <div class="actions">
+                    <button id="btnConvert" class="btn btn-outline" disabled>Convert & Save As…</button>
+                </div>
+            </section>
+
+            <!-- Right column: preview & status -->
+            <section class="panel preview">
+                <h2>Preview</h2>
+                <div class="preview-wrap" id="previewWrap">
+                    <div class="placeholder" id="previewPlaceholder">
+                        <span class="placeholder-icon">🖼️</span>
+                        <p>No image loaded</p>
+                    </div>
+                    <img id="previewImg" class="preview-img hidden" alt="Image preview">
+                </div>
+
+                <h2>Status</h2>
+                <div class="status">
+                    <div class="progress-wrap">
+                        <div class="progress-bar" id="progressBar">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <span id="progressPct" class="muted">0%</span>
+                    </div>
+                    <div id="statusText" class="status-text">Idle</div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script type="module" src="app.js"></script>
+</body>
+</html>
