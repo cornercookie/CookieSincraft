@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-upscale"
+description = "Enables the upscale command without any pre-configured scope."
+commands.allow = ["upscale"]
+
+[[permission]]
+identifier = "deny-upscale"
+description = "Denies the upscale command without any pre-configured scope."
+commands.deny = ["upscale"]

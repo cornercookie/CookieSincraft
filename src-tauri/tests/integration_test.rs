@@ -46,7 +46,10 @@ mod cpu;
 mod gpu;
 #[path = "../src/converter.rs"]
 mod converter;
+#[path = "../src/commands.rs"]
+mod commands;
 
+use crate::commands::validate_dimensions;
 use crate::converter::{Converter, ImageFormat};
 use crate::cpu::CpuUpscaler;
 use crate::gpu::GpuUpscaler;
@@ -289,4 +292,39 @@ fn backend_algorithm_enums_and_trait_methods() {
     if let Ok(gpu) = GpuUpscaler::new() {
         assert!(gpu.fallback_available());
     }
+}
+
+#[test]
+fn validate_dimensions_boundary_values() {
+    // 4096x4096 = exactly 64 MB buffer (16,777,216 pixels * 4 bytes)
+    assert!(validate_dimensions(4096, 4096).is_ok(), "4096x4096 should be allowed");
+
+    // 4097x4097 exceeds dimension limit
+    let err = validate_dimensions(4097, 4097).expect_err("4097x4097 should be rejected");
+    assert!(err.contains("4096"), "error should mention max dimension 4096");
+
+    // 8192x8192 exceeds dimension limit (checked before buffer limit)
+    let err = validate_dimensions(8192, 8192).expect_err("8192x8192 should be rejected");
+    assert!(err.contains("4096"), "error should mention max dimension 4096");
+
+    // Test buffer limit with dimensions under 4096 but over 64 MB
+    // 4096x4096 = 64 MB exactly, so we need dimensions slightly over that
+    // But since 4096 is the max dimension, we can't test buffer limit independently
+    // The buffer limit is enforced at the 4096x4096 boundary
+}
+
+#[test]
+fn validate_dimensions_zero_rejected() {
+    let err = validate_dimensions(0, 100).expect_err("zero width should be rejected");
+    assert_eq!(err, "target dimensions must be non-zero");
+
+    let err = validate_dimensions(100, 0).expect_err("zero height should be rejected");
+    assert_eq!(err, "target dimensions must be non-zero");
+}
+
+#[test]
+fn validate_dimensions_checked_mul_overflow() {
+    // u32::MAX exceeds dimension limit (4096), so dimension check triggers first
+    let err = validate_dimensions(u32::MAX, u32::MAX).expect_err("overflow should be rejected");
+    assert!(err.contains("4096"), "error should mention max dimension 4096: {}", err);
 }

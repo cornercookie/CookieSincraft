@@ -9,12 +9,15 @@
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{Mutex, atomic::{AtomicU64, AtomicU32, Ordering}};
+use std::time::Instant;
 
 use base64::Engine;
 use image::GenericImageView;
 use serde::{Deserialize, Serialize};
-use tauri::{ipc::Channel, AppHandle, Manager, Runtime, State};
+use tauri::{ipc::Channel, AppHandle, Manager, State};
+use tracing::warn;
+use tracing_appender::rolling;
 
 use crate::converter::{Converter, ImageFormat};
 use crate::cpu::CpuUpscaler;
@@ -34,6 +37,15 @@ pub struct ImageMeta {
     pub format: String,
     /// Base64-encoded PNG preview for the frontend to display directly.
     pub preview: String,
+}
+
+/// Result of loading an image from base64 (R1: drag-and-drop).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoadImageResult {
+    /// Path to the temporary file written to disk, for use by upscale.
+    pub temp_path: String,
+    /// Image metadata including preview.
+    pub image_meta: ImageMeta,
 }
 
 /// Payload for the `upscale` command.
@@ -58,6 +70,9 @@ pub struct UpscaleResultDto {
     pub used_fallback: bool,
     /// Reason for CPU fallback, if `used_fallback` is true.
     pub fallback_reason: Option<String>,
+    /// Base64-encoded PNG preview of the upscaled result (R3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// Progress event sent via Channel during upscale.
@@ -81,14 +96,123 @@ pub struct AppState {
     allowed_paths: Mutex<HashSet<String>>,
     /// Running jobs: job_id -> cancel flag
     running_jobs: Mutex<HashSet<String>>,
+    /// Rate limiter for check_path_exists: atomic counter with timestamp window
+    path_check_count: AtomicU32,
+    path_check_window_start: Mutex<Instant>,
+    /// Current session temp directory for cleanup on drop
+    session_dir: Mutex<Option<PathBuf>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        // Initialize tracing for error logging (SEC9) with file appender and rotation
+        let log_dir = Self::log_dir();
+        let _ = std::fs::create_dir_all(&log_dir);
+        let file_appender = rolling::daily(&log_dir, "cookiesincraft.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+        let _ = tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(non_blocking)
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .try_init();
+
+        // Clean up stale temp files on startup (SEC5)
+        Self::cleanup_stale_temp_dirs();
+
         Self {
             allowed_paths: Mutex::new(HashSet::new()),
             running_jobs: Mutex::new(HashSet::new()),
+            path_check_count: AtomicU32::new(0),
+            path_check_window_start: Mutex::new(Instant::now()),
+            session_dir: Mutex::new(None),
         }
+    }
+
+    /// Get platform-specific log directory (SEC9)
+    fn log_dir() -> PathBuf {
+        if cfg!(target_os = "windows") {
+            std::env::var("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| std::env::temp_dir())
+                .join("CookieSincraft")
+                .join("logs")
+        } else {
+            dirs::data_dir()
+                .unwrap_or_else(|| std::env::temp_dir())
+                .join("CookieSincraft")
+                .join("logs")
+        }
+    }
+
+    /// Clean up temp directories older than 24 hours (SEC5).
+    /// Also enforces quota across ALL session directories.
+    fn cleanup_stale_temp_dirs() {
+        let temp_root = std::env::temp_dir().join("cookiesincraft");
+        if !temp_root.exists() {
+            return;
+        }
+        let now = std::time::SystemTime::now();
+        let max_age = std::time::Duration::from_secs(24 * 60 * 60);
+        const MAX_TOTAL_QUOTA: u64 = 500 * 1024 * 1024; // 500 MB total across all sessions
+        let mut total_size: u64 = 0;
+        let mut dirs_to_check = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&temp_root) {
+                    for entry in entries.flatten() {
+                        if let Ok(metadata) = entry.metadata() {
+                            if metadata.is_dir() {
+                                if let Ok(modified) = metadata.modified() {
+                                    if now.duration_since(modified).unwrap_or_default() > max_age {
+                                        let _ = std::fs::remove_dir_all(entry.path());
+                                    } else {
+                                        dirs_to_check.push(entry.path());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Enforce global quota across all active session dirs
+                for dir in &dirs_to_check {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            if let Ok(metadata) = entry.metadata() {
+                                total_size += metadata.len();
+                            }
+                        }
+                    }
+                }
+
+                if total_size > MAX_TOTAL_QUOTA {
+                    // Delete oldest directories first until under quota
+                    let mut dirs_with_age: Vec<_> = dirs_to_check
+                        .iter()
+                        .filter_map(|d| {
+                            std::fs::metadata(d)
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .map(|m| (d.clone(), m))
+                        })
+                        .collect();
+                    dirs_with_age.sort_by_key(|(_, m)| *m);
+                    for (dir, _) in dirs_with_age {
+                        if total_size <= MAX_TOTAL_QUOTA {
+                            break;
+                        }
+                        if let Ok(entries) = std::fs::read_dir(&dir) {
+                            for entry in entries.flatten() {
+                                if let Ok(metadata) = entry.metadata() {
+                                    total_size = total_size.saturating_sub(metadata.len());
+                                }
+                            }
+                        }
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
+                }
     }
 
     pub fn allow_read(&self, path: &str) {
@@ -104,7 +228,10 @@ impl AppState {
         if paths.contains(path) {
             Ok(())
         } else {
-            Err(format!("access denied: path '{}' was not selected through a file dialog", path))
+            Err(format!(
+                "access denied: path '{}' was not selected through a file dialog",
+                path
+            ))
         }
     }
 
@@ -113,7 +240,10 @@ impl AppState {
         if paths.contains(path) {
             Ok(())
         } else {
-            Err(format!("access denied: path '{}' was not selected through a file dialog", path))
+            Err(format!(
+                "access denied: path '{}' was not selected through a file dialog",
+                path
+            ))
         }
     }
 
@@ -143,6 +273,25 @@ impl AppState {
     pub fn finish_job(&self, job_id: &str) {
         self.running_jobs.lock().unwrap().remove(job_id);
     }
+
+    /// Set the session temp directory for cleanup on drop
+    pub fn set_session_dir(&self, path: PathBuf) {
+        self.session_dir.lock().unwrap().replace(path);
+    }
+
+    /// Clear session directory reference (called when session_dir is cleaned up externally)
+    pub fn clear_session_dir(&self) {
+        self.session_dir.lock().unwrap().take();
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Best-effort cleanup of our session directory on process exit (SEC5)
+        if let Some(dir) = self.session_dir.lock().unwrap().take() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
 }
 
 impl Default for AppState {
@@ -160,6 +309,48 @@ static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 fn next_job_id() -> String {
     let n = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
     format!("job-{n}")
+}
+
+/// Check if a filename is a Windows reserved name (CON, PRN, AUX, NUL, COM1-9, LPT1-9).
+/// Used to prevent creating files with reserved device names.
+fn is_windows_reserved_name(name: &str) -> bool {
+    let upper = name.to_uppercase();
+    let base = upper.split('.').next().unwrap_or(&upper);
+    matches!(
+        base,
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
+/// Validate target dimensions against limits (R5).
+/// Max dimension: 4096x4096, max buffer: 64 MB (RGBA8 = 4 bytes/pixel).
+pub fn validate_dimensions(width: u32, height: u32) -> Result<(), String> {
+    const MAX_DIM: u32 = 4096;
+    const MAX_BUFFER_BYTES: u64 = 64 * 1024 * 1024; // 64 MB
+
+    if width == 0 || height == 0 {
+        return Err("target dimensions must be non-zero".to_string());
+    }
+    if width > MAX_DIM || height > MAX_DIM {
+        return Err(format!(
+            "target dimensions exceed limit: {}x{} (max {}x{})",
+            width, height, MAX_DIM, MAX_DIM
+        ));
+    }
+    // RGBA8 = 4 bytes/pixel, use checked_mul to prevent overflow (C4)
+    let buffer_bytes = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or("dimension calculation overflow")?;
+    if buffer_bytes > MAX_BUFFER_BYTES {
+        return Err(format!(
+            "estimated buffer size {} MB exceeds 64 MB limit",
+            buffer_bytes / (1024 * 1024)
+        ));
+    }
+    Ok(())
 }
 
 fn parse_backend(value: &str) -> Result<Backend, String> {
@@ -260,6 +451,10 @@ pub fn load_image(
     let image = Converter::load_image(PathBuf::from(&path).as_path())
         .map_err(|e| e.to_string())?;
     let (width, height) = image.dimensions();
+    
+    // Validate input image dimensions against limits (R5)
+    validate_dimensions(width, height)?;
+
     let format = format_from_path(std::path::Path::new(&path));
     let preview = image_to_base64_preview(&image);
     Ok(ImageMeta {
@@ -267,6 +462,152 @@ pub fn load_image(
         height,
         format,
         preview,
+    })
+}
+
+/// Check if a path exists on the filesystem (R2: overwrite confirmation).
+/// This bypasses the allowlist but is rate-limited (20 requests/minute) and audited (SEC3).
+/// Note: Intentionally bypasses allowlist for overwrite confirmation flow, but has rate limiting.
+#[tauri::command]
+pub fn check_path_exists(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    // Rate limiting: 20 requests per minute (SEC3) - atomic check-and-increment with sliding window
+    {
+        let mut window_start = state.path_check_window_start.lock().unwrap();
+        let now = Instant::now();
+        
+        // Reset window if more than 60 seconds have passed
+        if now.duration_since(*window_start) >= std::time::Duration::from_secs(60) {
+            *window_start = now;
+            state.path_check_count.store(0, Ordering::Relaxed);
+        }
+        
+        // Atomically increment and check
+        let current = state.path_check_count.fetch_add(1, Ordering::AcqRel) + 1;
+        if current > 20 {
+            warn!("check_path_exists rate limit exceeded");
+            return Err("path check rate limit exceeded".to_string());
+        }
+    }
+
+    // Only check existence, no allowlist check (S2, SEC3) - intentional for overwrite flow
+    // Sanitize error to avoid path disclosure (SEC4)
+    std::path::Path::new(&path)
+        .try_exists()
+        .map_err(|_| "path check failed".to_string())
+}
+
+/// Load an image from base64, write to isolated temp directory, and return metadata (R1: drag-and-drop).
+#[tauri::command]
+pub fn load_image_from_base64(
+    base64: String,
+    suggested_name: String,
+    state: State<'_, AppState>,
+) -> Result<LoadImageResult, String> {
+    // Input size check: base64 string must not exceed ~70 MB (SEC2)
+    const MAX_BASE64_LEN: usize = 70 * 1024 * 1024;
+    if base64.len() > MAX_BASE64_LEN {
+        return Err("base64 input too large".to_string());
+    }
+
+    // Filename sanitization: prevent path traversal (SEC1, B1)
+    // Also block Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    let clean_name = std::path::Path::new(&suggested_name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| {
+            !s.is_empty()
+                && !s.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|'])
+                && !is_windows_reserved_name(s)
+        })
+        .ok_or("invalid suggested filename")?;
+
+    // Create isolated temp directory (cross-platform, SEC5, SEC8)
+    let temp_root = std::env::temp_dir().join("cookiesincraft");
+    let session_dir = temp_root.join(format!(
+        "{}_{}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
+
+    // Register session dir for cleanup on drop (SEC5)
+    state.set_session_dir(session_dir.clone());
+
+    // Decode base64
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&base64)
+        .map_err(|_| "invalid base64 data".to_string())?;
+
+    // Load image to validate and get dimensions
+    let image = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
+    let (width, height) = image.dimensions();
+    
+    // Validate input image dimensions against limits (R5)
+    validate_dimensions(width, height)?;
+
+    let format = format_from_path(std::path::Path::new(&clean_name));
+
+    // Write to temp file
+    let temp_path = session_dir.join(&clean_name);
+    image
+        .save(&temp_path)
+        .map_err(|e| format!("failed to write temp file: {}", e))?;
+
+    // Temp directory quota check: single file 100 MB, global total 500 MB across all sessions (SEC2, I1, SEC11)
+    // Enforced in cleanup_stale_temp_dirs and here for current session
+    let mut total_size: u64 = 0;
+    let mut max_file_size: u64 = 0;
+    if let Ok(entries) = std::fs::read_dir(&session_dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                let size = metadata.len();
+                total_size += size;
+                if size > max_file_size {
+                    max_file_size = size;
+                }
+            }
+        }
+    }
+    // Also check global quota across all session dirs
+    if let Ok(entries) = std::fs::read_dir(&temp_root) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_dir() {
+                    if let Ok(sub_entries) = std::fs::read_dir(entry.path()) {
+                        for sub_entry in sub_entries.flatten() {
+                            if let Ok(sub_meta) = sub_entry.metadata() {
+                                total_size = total_size.saturating_add(sub_meta.len());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
+    const MAX_TOTAL_SIZE: u64 = 500 * 1024 * 1024; // 500 MB global
+    if max_file_size > MAX_FILE_SIZE || total_size > MAX_TOTAL_SIZE {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err("temp quota exceeded".to_string());
+    }
+
+    // Add session directory to allow_read (directory-level, SEC6, SEC9)
+    state.allow_read(&session_dir.to_string_lossy());
+
+    // Generate preview
+    let preview = image_to_base64_preview(&image);
+
+    Ok(LoadImageResult {
+        temp_path: temp_path.to_string_lossy().to_string(),
+        image_meta: ImageMeta {
+            width,
+            height,
+            format,
+            preview,
+        },
     })
 }
 
@@ -319,7 +660,6 @@ pub fn select_save_path(
     filters: Vec<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    eprintln!("select_save_path called: default_name={}, filters={:?}", default_name, filters);
     let mut dialog = FileDialog::new().set_file_name(&default_name);
     for filter in filters {
         if filter.len() >= 2 {
@@ -329,7 +669,6 @@ pub fn select_save_path(
         }
     }
     let selected = dialog.save_file();
-    eprintln!("select_save_path returned: {:?}", selected);
     if let Some(ref path) = selected {
         let path_str = path.to_string_lossy().to_string();
         state.allow_write(&path_str);
@@ -352,6 +691,9 @@ pub async fn upscale(
     let backend = parse_backend(&job.backend)?;
     let algorithm = parse_algorithm(&job.algorithm)?;
 
+    // Validate dimensions against limits (R5)
+    validate_dimensions(job.target_width, job.target_height)?;
+
     let input_path = PathBuf::from(&job.input_path);
     let output_path = PathBuf::from(&job.output_path);
     let job_id = next_job_id();
@@ -366,6 +708,7 @@ pub async fn upscale(
 
     // Check path permissions
     state.check_read(&job.input_path.to_string_lossy())?;
+    // Check write permission for output path (do NOT allow_write first - that bypasses validation)
     state.check_write(&job.output_path.to_string_lossy())?;
 
     // Register job
@@ -458,6 +801,9 @@ pub async fn upscale(
 
         let (width, height) = upscaled.dimensions();
 
+        // Generate preview of upscaled result (R3)
+        let preview = image_to_base64_preview(&upscaled);
+
         Ok(UpscaleResultDto {
             job_id: job_id_clone,
             output_path: job_clone.output_path.to_string_lossy().to_string(),
@@ -465,6 +811,7 @@ pub async fn upscale(
             height,
             used_fallback,
             fallback_reason,
+            preview: Some(preview),
         })
     }).await;
 

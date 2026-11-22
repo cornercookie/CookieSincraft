@@ -32,6 +32,9 @@ const convertQuality = $("convertQuality")
 const convertQualityValue = $("convertQualityValue")
 const btnConvert = $("btnConvert")
 
+// Toast container (R4)
+const toastContainer = $("toastContainer")
+
 // ---- Algorithm options by backend ----
 const ALGORITHMS = {
   cpu: ["Nearest", "Bilinear", "CatmullRom", "Lanczos3"],
@@ -67,6 +70,141 @@ function resetJob() {
   btnCancel.disabled = true
   btnExport.disabled = true
   btnConvert.disabled = !currentFile
+}
+
+// ---- Toast notifications (R4) ----
+function showToast(message, kind = "info", duration = 4000) {
+  const toast = document.createElement("div")
+  toast.className = `toast toast-${kind}`
+  toast.textContent = message  // XSS-safe: textContent not innerHTML
+  toastContainer.appendChild(toast)
+  setTimeout(() => toast.remove(), duration)
+}
+
+// ---- Overwrite confirmation (R2) ----
+async function confirmOverwrite(outputPath) {
+  const exists = await invoke("check_path_exists", { path: outputPath })
+  if (!exists) return { action: "overwrite", finalPath: outputPath }
+
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div")
+    overlay.className = "modal-overlay"
+    const modal = document.createElement("div")
+    modal.className = "modal"
+
+    // XSS-safe: use textContent for user-controlled strings
+    const fileName = outputPath.split(/[/\\]/).pop()
+    const p1 = document.createElement("p")
+    p1.textContent = `檔案已存在：${fileName}`
+    const p2 = document.createElement("p")
+    p2.textContent = "要如何處理？"
+    modal.appendChild(p1)
+    modal.appendChild(p2)
+
+    const actions = document.createElement("div")
+    actions.className = "modal-actions"
+
+    const btnOverwrite = document.createElement("button")
+    btnOverwrite.id = "ovrOverwrite"
+    btnOverwrite.className = "btn btn-primary"
+    btnOverwrite.textContent = "覆寫"
+    btnOverwrite.onclick = () => {
+      overlay.remove()
+      resolve({ action: "overwrite", finalPath: outputPath })
+    }
+
+    const btnRename = document.createElement("button")
+    btnRename.id = "ovrRename"
+    btnRename.className = "btn btn-secondary"
+    btnRename.textContent = "自動改名"
+    btnRename.onclick = async () => {
+      try {
+        const newPath = await generateUniquePath(outputPath)
+        overlay.remove()
+        resolve({ action: "rename", finalPath: newPath })
+      } catch (e) {
+        showToast("無法產生新檔名", "err")
+      }
+    }
+
+    const btnCancel = document.createElement("button")
+    btnCancel.id = "ovrCancel"
+    btnCancel.className = "btn btn-outline"
+    btnCancel.textContent = "取消"
+    btnCancel.onclick = () => {
+      overlay.remove()
+      resolve({ action: "cancel" })
+    }
+
+    actions.appendChild(btnOverwrite)
+    actions.appendChild(btnRename)
+    actions.appendChild(btnCancel)
+    modal.appendChild(actions)
+    overlay.appendChild(modal)
+    document.body.appendChild(overlay)
+  })
+}
+
+// Generate unique path with _upscaled_N suffix (max 100 attempts)
+// Respects backend rate limit of 20 requests/minute (3 second delay between requests)
+async function generateUniquePath(basePath) {
+  const dot = basePath.lastIndexOf(".")
+  const ext = dot === -1 ? "" : basePath.slice(dot)
+  const base = dot === -1 ? basePath : basePath.slice(0, dot)
+  for (let n = 1; n <= 100; n++) {
+    const candidate = `${base}_upscaled_${n}${ext}`
+    const exists = await invoke("check_path_exists", { path: candidate })
+    if (!exists) return candidate
+    // Delay to respect 20/min rate limit (3 seconds between requests)
+    await new Promise(r => setTimeout(r, 3000))
+  }
+  throw new Error("Unable to generate unique path after 100 attempts")
+}
+
+// Load image from base64 (drag-and-drop, R1)
+async function loadImageFromBase64(file) {
+  // Frontend size check: 50 MB limit (Q7)
+  const MAX_FILE_SIZE = 50 * 1024 * 1024
+  if (file.size > MAX_FILE_SIZE) {
+    showToast(`檔案過大：${(file.size / 1024 / 1024).toFixed(1)} MB > 50 MB 限制`, "err")
+    return
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      try {
+        const base64 = e.target.result.split(",")[1] // strip data URL prefix
+        const result = await invoke("load_image_from_base64", {
+          base64,
+          suggestedName: file.name,
+        })
+        currentFile = {
+          path: result.temp_path,
+          name: file.name,
+        }
+        fileName.textContent = currentFile.name
+        fileName.className = "file-name"
+        previewImg.src = result.image_meta.preview
+        previewPlaceholder.classList.add("hidden")
+        previewImg.classList.remove("hidden")
+        setStatus(
+          `Loaded: ${currentFile.name} (${result.image_meta.width}×${result.image_meta.height}, ${result.image_meta.format})`,
+          "ok"
+        )
+        btnExport.disabled = false
+        btnConvert.disabled = false
+        outputPath = null
+        resolve()
+      } catch (err) {
+        console.error(err)
+        setStatus("Load failed: " + (err?.message ?? String(err)), "err")
+        reject(err)
+      }
+    }
+    reader.onerror = () => reject(new Error("File read failed"))
+    reader.readAsDataURL(file)
+  })
 }
 
 // ---- Backend <-> algorithm coupling ----
@@ -179,8 +317,18 @@ populateAlgorithms()
 // Click drop zone to open file picker (Tauri dialog)
 dropZone.addEventListener("click", selectImage)
 
-// Drag-over visual feedback (drop itself still opens the dialog, since
-// drag-and-drop File objects carry no filesystem path in browsers).
+// File input change handler (alternative to drag-drop, R1)
+const fileInput = $("fileInput")
+fileInput.addEventListener("change", (e) => {
+  const file = e.target.files?.[0]
+  if (file && file.type.startsWith("image/")) {
+    loadImageFromBase64(file)
+  }
+  // Reset value so same file can be selected again
+  fileInput.value = ""
+})
+
+// Drag-over visual feedback
 dropZone.addEventListener("dragover", (e) => {
   e.preventDefault()
   dropZone.classList.add("dragover")
@@ -191,27 +339,43 @@ dropZone.addEventListener("dragleave", () => {
   dropZone.classList.remove("dragover")
 })
 
-dropZone.addEventListener("drop", (e) => {
+// Drop handler: read file as base64 and load via load_image_from_base64 (R1)
+dropZone.addEventListener("drop", async (e) => {
   e.preventDefault()
   dropZone.classList.remove("dragover")
-  selectImage()
+  dropZone.classList.remove("drag-error")
+
+  const file = e.dataTransfer.files?.[0]
+  if (!file || !file.type.startsWith("image/")) {
+    dropZone.classList.add("drag-error")
+    showToast("請放置圖片檔案", "err")
+    return
+  }
+  await loadImageFromBase64(file)
 })
 
 // ---- Start Upscale ----
 btnStart.addEventListener("click", async () => {
   if (!currentFile) {
-    alert("Please select an image first.")
+    alert("請先選擇圖片")
     return
   }
 
   const [width, height] = resolutionSelect.value.split("x").map(Number)
   const out = generateOutputPath(currentFile.path)
-  outputPath = out
+
+  // Overwrite confirmation (R2)
+  const overwriteResult = await confirmOverwrite(out)
+  if (overwriteResult.action === "cancel") {
+    setStatus("Cancelled", "warn")
+    return
+  }
+  outputPath = overwriteResult.finalPath
 
   const payload = {
     job: {
       input_path: currentFile.path,
-      output_path: out,
+      output_path: outputPath,
       backend: backendSelect.value,
       algorithm: algorithmSelect.value,
       target_width: width,
@@ -239,8 +403,14 @@ btnStart.addEventListener("click", async () => {
           currentJobId = null
           upscaleChannel = null
           setProgress(100)
+          // Update preview with upscaled result (R3)
+          if (data.result.preview) {
+            previewImg.src = data.result.preview
+          }
+          // Toast notification on fallback (R4)
           if (data.result.used_fallback && data.result.fallback_reason) {
             setStatus(`Upscale complete (GPU fallback: ${data.result.fallback_reason})`, "ok")
+            showToast(`已改用 CPU 放大：${data.result.fallback_reason}`, "warn")
           } else {
             setStatus("Upscale complete.", "ok")
           }
@@ -273,7 +443,7 @@ btnStart.addEventListener("click", async () => {
     const result = await invoke("upscale", {
       job: {
         input_path: currentFile.path,
-        output_path: generateOutputPath(currentFile.path),
+        output_path: outputPath,
         backend: backendSelect.value,
         algorithm: algorithmSelect.value,
         target_width: width,
@@ -288,6 +458,7 @@ btnStart.addEventListener("click", async () => {
   } catch (err) {
     console.error("Upscale error:", err)
     setStatus("Upscale failed: " + String(err), "err")
+    upscaleChannel = null  // Clear channel on error
     resetJob()
   }
 })

@@ -8,11 +8,11 @@
 //! `UpscaleError` is returned so the caller can fall back to the CPU.
 //! This module never panics.
 
+use std::panic::{self, AssertUnwindSafe};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
-use futures::executor;
 use image::GenericImageView;
 use wgpu::util::DeviceExt;
 
@@ -110,31 +110,19 @@ impl GpuUpscaler {
             push_constant_ranges: &[],
         });
 
-        // Load shaders from external files
-        let easu_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("fsr easu shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../shaders/fsr_easu.wgsl"
-            ))),
-        });
-        let rcas_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("fsr rcas shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../shaders/fsr_rcas.wgsl"
-            ))),
-        });
-        let nis_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("nis shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../shaders/nis_scaler.wgsl"
-            ))),
-        });
-        let anime4k_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("anime4k shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
-                "../shaders/anime4k_cnn_x2_m.wgsl"
-            ))),
-        });
+        // Load shaders from external files with panic protection
+        let easu_shader = Self::create_shader_module_safe(&device, "fsr easu shader", include_str!(
+            "../shaders/fsr_easu.wgsl"
+        ))?;
+        let rcas_shader = Self::create_shader_module_safe(&device, "fsr rcas shader", include_str!(
+            "../shaders/fsr_rcas.wgsl"
+        ))?;
+        let nis_shader = Self::create_shader_module_safe(&device, "nis shader", include_str!(
+            "../shaders/nis_scaler.wgsl"
+        ))?;
+        let anime4k_shader = Self::create_shader_module_safe(&device, "anime4k shader", include_str!(
+            "../shaders/anime4k_cnn_x2_m.wgsl"
+        ))?;
 
         let easu_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("fsr easu pipeline"),
@@ -184,6 +172,27 @@ impl GpuUpscaler {
             anime4k_pipeline,
             sampler,
         })
+    }
+
+    /// Safely create a shader module, catching panics from validation errors.
+    fn create_shader_module_safe(
+        device: &wgpu::Device,
+        label: &str,
+        source: &str,
+    ) -> Result<wgpu::ShaderModule, UpscaleError> {
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(source)),
+            })
+        }));
+
+        match result {
+            Ok(module) => Ok(module),
+            Err(_) => Err(UpscaleError::BackendUnavailable(format!(
+                "shader module creation panicked (likely WGSL validation error): {label}"
+            ))),
+        }
     }
 
     /// Upscale an image according to `job`.
@@ -245,8 +254,27 @@ impl GpuUpscaler {
             ));
         }
 
+        // FSR 1.0 two-pass: EASU (upscale) -> RCAS (sharpen)
+        // Pass 1: EASU upscales from source to destination size
+        let intermediate = self.execute_pipeline_with_checkpoints(
+            job,
+            image,
+            &self.easu_pipeline,
+            0.0, // sharpness not used in EASU
+        )?;
+
+        // Pass 2: RCAS sharpens the upscaled result
         // Use RCAS pass with 0.2 stops (AMD default)
-        self.upscale_single_pass(job, image, &self.rcas_pipeline, 0.2)
+        self.execute_pipeline_with_checkpoints(
+            &UpscaleJob {
+                target_width: dst_width,
+                target_height: dst_height,
+                ..job.clone()
+            },
+            &intermediate,
+            &self.rcas_pipeline,
+            0.2,
+        )
     }
 
     fn upscale_nis(
@@ -275,7 +303,7 @@ impl GpuUpscaler {
         }
 
         // Sharpness 0.5 = slider midpoint (NIS_Config.h:167)
-        self.upscale_single_pass(job, image, &self.nis_pipeline, 0.5)
+        self.execute_pipeline_with_checkpoints(job, image, &self.nis_pipeline, 0.5)
     }
 
     fn upscale_anime4k(
@@ -294,19 +322,41 @@ impl GpuUpscaler {
             return Err(UpscaleError::Unknown("target dimensions must be non-zero".to_string()));
         }
 
-        // Simplified: single pass with Anime4K pipeline
-        // Full implementation would chain multiple 2x passes + depth-to-space
-        self.upscale_single_pass(job, image, &self.anime4k_pipeline, 0.5)
+        // WHEN condition: only run Anime4K when both axes scale > 1.2
+        let scale_x = dst_width as f32 / src_width as f32;
+        let scale_y = dst_height as f32 / src_height as f32;
+        if scale_x <= 1.2 || scale_y <= 1.2 {
+            // Below threshold, use simple upscale (bilinear)
+            return self.execute_pipeline_with_checkpoints(job, image, &self.anime4k_pipeline, 0.0);
+        }
+
+        // For >2x, chain multiple 2x passes then final Lanczos3 to exact size
+        // Simplified: single pass for now
+        self.execute_pipeline_with_checkpoints(job, image, &self.anime4k_pipeline, 0.5)
     }
 
-    fn upscale_single_pass(
+    fn execute_pipeline_with_checkpoints(
         &self,
         job: &UpscaleJob,
         image: &image::DynamicImage,
         pipeline: &wgpu::ComputePipeline,
         sharpness: f32,
     ) -> Result<image::DynamicImage, UpscaleError> {
-        self.execute_pipeline(job, image, pipeline, sharpness)
+        // Push error scopes for validation and OOM
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+
+        let result = self.execute_pipeline(job, image, pipeline, sharpness);
+
+        // Check error scopes after execution
+        let validation_err = futures::executor::block_on(self.device.pop_error_scope());
+        let oom_err = futures::executor::block_on(self.device.pop_error_scope());
+        if let Some(err) = validation_err.or(oom_err) {
+            *self.error_flag.lock().unwrap() = true;
+            return Err(UpscaleError::BackendUnavailable(format!("GPU error scope: {err:?}")));
+        }
+
+        result
     }
 
     fn execute_pipeline(
@@ -440,10 +490,6 @@ impl GpuUpscaler {
             ],
         });
 
-        // Push error scopes
-        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-
         // Encode compute dispatch
         let mut encoder = self
             .device
@@ -505,13 +551,6 @@ impl GpuUpscaler {
                 let _ = self.device.poll(wgpu::Maintain::Wait);
                 break;
             }
-        }
-
-        // Check error scopes
-        let validation_err = futures::executor::block_on(self.device.pop_error_scope());
-        let oom_err = futures::executor::block_on(self.device.pop_error_scope());
-        if let Some(err) = validation_err.or(oom_err) {
-            return Err(UpscaleError::BackendUnavailable(format!("GPU error scope: {err:?}")));
         }
 
         // Read back

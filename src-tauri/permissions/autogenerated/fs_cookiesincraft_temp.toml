@@ -1,0 +1,17 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-fs-cookiesincraft-temp"
+description = "Allows read/write access to the CookieSincraft temp directory."
+fs.allow = [
+  { path = "$TEMP/cookiesincraft/*/**", read = true, write = true, create = true },
+  { path = "$APPDATA/../Local/Temp/cookiesincraft/*/**", read = true, write = true, create = true }
+]
+
+[[permission]]
+identifier = "deny-fs-cookiesincraft-temp"
+description = "Denies access to the CookieSincraft temp directory."
+fs.deny = [
+  { path = "$TEMP/cookiesincraft/*/**" },
+  { path = "$APPDATA/../Local/Temp/cookiesincraft/*/**" }
+]

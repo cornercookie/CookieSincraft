@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-image-from-base64"
+description = "Enables the load_image_from_base64 command without any pre-configured scope."
+commands.allow = ["load_image_from_base64"]
+
+[[permission]]
+identifier = "deny-load-image-from-base64"
+description = "Denies the load_image_from_base64 command without any pre-configured scope."
+commands.deny = ["load_image_from_base64"]

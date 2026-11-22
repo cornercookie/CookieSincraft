@@ -22,3 +22,8 @@ rfd = "0.13"
 base64 = "0.22"
 futures = "0.3"
 tokio = { version = "1.0", features = ["full"] }
+fastrand = "2.0"
+tracing = { version = "0.1", features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing-appender = "0.2"
+dirs = "5.0"

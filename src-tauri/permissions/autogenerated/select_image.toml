@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-image"
+description = "Enables the select_image command without any pre-configured scope."
+commands.allow = ["select_image"]
+
+[[permission]]
+identifier = "deny-select-image"
+description = "Denies the select_image command without any pre-configured scope."
+commands.deny = ["select_image"]
