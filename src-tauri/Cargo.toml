@@ -1,6 +1,6 @@
 [package]
 name = "cookie-sincraft"
-version = "0.1.0"
+version = "0.2.0"
 description = "CookieSincraft Tauri 2 Project"
 authors = ["You"]
 edition = "2021"
