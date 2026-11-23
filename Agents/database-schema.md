@@ -2,9 +2,9 @@
 
 | 文件資訊 | 內容 |
 | --- | --- |
-| 版本／建立／更新 | v1.0／2026-11-22／2026-11-22 |
-| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：確認沒有資料庫，記錄實際的持久化資料（圖檔讀寫）與記憶體狀態 |
-| 權威來源 | `src-tauri/Cargo.toml`（無資料庫相依）、`src-tauri/src/commands.rs`、`src-tauri/src/converter.rs`、`src/app.js` |
+| 版本／建立／更新 | v1.1／2026-11-23／2026-11-23 |
+| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：確認沒有資料庫，記錄實際的持久化資料（圖檔讀寫）與記憶體狀態。v1.1 新增 `settings.json` 設定檔持久化（見下方「持久化資料：設定檔」） |
+| 權威來源 | `src-tauri/Cargo.toml`（無資料庫相依）、`src-tauri/src/commands.rs`、`src-tauri/src/converter.rs`、`src-tauri/src/settings.rs`、`src/app.js` |
 
 ## 現況：沒有資料庫
 
@@ -44,6 +44,30 @@ flowchart LR
 
 - 整合測試寫入 `src-tauri/tests/*.png|jpg|webp`（已列入 `.gitignore`）。
 - 單元測試寫入系統暫存目錄下的 `cookiesincraft_*` 資料夾，測試結束不清除。
+
+## 持久化資料：設定檔（settings.json）
+
+v0.2.0 新增設定檔持久化，關閉程式後重開仍保留使用者選項。儲存於 Tauri 應用程式資料目錄下的 `settings.json`，由後端 `settings.rs` 讀寫，前端僅透過 `read_settings`/`write_settings`/`add_recent_file` IPC 指令交握，不直接讀寫本機檔案。
+
+```mermaid
+flowchart LR
+    FE["前端 app.js"] -- "invoke(read_settings/write_settings/add_recent_file)" --> BE["後端 settings.rs"]
+    BE -- "JSON 檔案" --> CFG["Tauri app config dir<br/>settings.json"]
+```
+
+|| 欄位 | 中文意義 | 允許值／預設 |
+| --- | --- | --- | --- |
+| `backend` | 放大執行端 | `cpu`／`gpu`，預設 `cpu` |
+| `algorithm` | 放大演算法 | `Nearest`/`Bilinear`/`CatmullRom`/`Lanczos3`（CPU）或 `Fsr1_0`/`Anime4k`/`Nis`（GPU），預設 `Lanczos3` |
+| `quality` | JPEG 品質 | 50～100，預設 85 |
+| `output_folder` | 自訂輸出資料夾 | 絕對路徑字串，或 `null`（寫入原圖同資料夾，現行行為） |
+| `keep_aspect_ratio` | 保持長寬比 | `true`/`false`，預設 `false` |
+| `filename_template` | 輸出檔名樣板 | 字串，預設 `{name}_upscaled_{scale}x.{ext}`；變數 `{name}`、`{scale}`、`{ext}` |
+| `recent_files` | 最近開啟檔案 | 最多 5 筆絕對路徑字串，新插頭舊擠尾，去重 |
+
+- 寫入方式：先寫暫存檔（`settings.json.tmp`）再 `rename` 至 `settings.json`（atomic replace），避免寫至一半的損壞檔。
+- 路徑由後端自行構建（Tauri app config dir），前端不得傳入路徑；不進入 `AppState.check_write` 允許清單，為後端內部例外，已文件化。
+- 損壞檔：`read_settings` 忽略損壞檔，回傳預設值，於狀態列提示；不自動覆寫損壞檔。
 
 ## 日後加入儲存時
 

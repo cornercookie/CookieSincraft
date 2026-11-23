@@ -63,10 +63,53 @@
                     <small class="muted">50 − 100</small>
                 </div>
 
+                <div class="field">
+                    <label class="checkbox">
+                        <input type="checkbox" id="keepAspectRatio">
+                        保持長寬比（以短邊為準縮放）
+                    </label>
+                    <small class="muted">勾選後輸出短邊等於目標短邊，長邊按原圖比例</small>
+                </div>
+
                 <div class="actions">
                     <button id="btnStart" class="btn btn-primary">Start Upscale</button>
                     <button id="btnCancel" class="btn btn-secondary" disabled>Cancel</button>
                     <button id="btnExport" class="btn btn-outline" disabled>Export (Save As…)</button>
+                </div>
+
+                <h2>Settings</h2>
+                <div class="field">
+                    <label for="outputFolder">Output folder</label>
+                    <div class="slider-row">
+                        <input type="text" id="outputFolder" placeholder="Same as source image" readonly class="text-input">
+                        <button id="btnChooseOutputFolder" class="btn btn-outline">Choose…</button>
+                    </div>
+                    <small class="muted">留空則寫入原圖同資料夾</small>
+                </div>
+                <div class="field">
+                    <label for="filenameTemplate">Filename template</label>
+                    <input type="text" id="filenameTemplate" value="{name}_upscaled_{scale}x.{ext}" class="text-input">
+                    <small class="muted">Variables: {name}, {scale}, {ext}</small>
+                </div>
+                <div class="field">
+                    <label>Recent files</label>
+                    <div id="recentFiles" class="recent-files"></div>
+                </div>
+
+                <h2>Batch Upscale</h2>
+                <div class="field">
+                    <button id="btnSelectBatch" class="btn btn-outline">Select multiple images…</button>
+                    <button id="btnStartBatch" class="btn btn-primary" disabled>Start batch upscale</button>
+                </div>
+                <div id="batchFileList" class="batch-file-list"></div>
+                <div class="field">
+                    <div class="progress-wrap">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="batchProgressFill"></div>
+                        </div>
+                        <span id="batchProgressPct" class="muted">0%</span>
+                    </div>
+                    <span id="batchStatus" class="status-text">Idle</span>
                 </div>
 
                 <h2>Convert (Format)</h2>

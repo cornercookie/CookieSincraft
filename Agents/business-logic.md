@@ -2,9 +2,9 @@
 
 | 文件資訊 | 內容 |
 | --- | --- |
-| 版本／建立／更新 | v1.1／2026-11-22／2026-11-22 |
-| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：放大流程、演算法對應、GPU→CPU 備援、目標解析度、格式與品質規則、預覽、匯出與轉換、錯誤處理、已知落差。v1.1 GPU→CPU 備援補本機實測：著色器 panic 使備援分支走不到 |
-| 權威來源 | `src-tauri/src/commands.rs`、`src-tauri/src/converter.rs`、`src-tauri/src/cpu.rs`、`src-tauri/src/gpu.rs`、`src-tauri/src/upscaler.rs`、`src/app.js` |
+| 版本／建立／更新 | v1.2／2026-11-23／2026-11-23 |
+| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：放大流程、演算法對應、GPU→CPU 備援、目標解析度、格式與品質規則、預覽、匯出與轉換、錯誤處理、已知落差。v1.1 GPU→CPU 備援補本機實測：著色器 panic 使備援分支走不到。v1.2 #[#4] 新增保持長寬比（前端以短邊預計算，後端僅 `keep_aspect_ratio` 標記）、自訂輸出資料夾／檔名樣板、設定檔持久化、批次處理業務規則 |
+| 權威來源 | `src-tauri/src/commands.rs`、`src-tauri/src/converter.rs`、`src-tauri/src/cpu.rs`、`src-tauri/src/gpu.rs`、`src-tauri/src/upscaler.rs`、`src-tauri/src/settings.rs`、`src/app.js` |
 
 ## 放大流程
 
@@ -56,6 +56,7 @@ sequenceDiagram
 
 - 畫面提供四個固定尺寸：3840×2160（預設）、1920×1080、2560×1440、7680×4320（`index.html:49`）。
 - 放大器直接輸出指定寬高，**不保持原圖長寬比**；原圖大於目標時實際上是縮小。
+- 勾選「保持長寬比」時，由**前端以短邊為準**預計算縮放後寬高（短邊 = 目標尺寸短邊；長邊 = 原圖比例 × 短邊，取整數），再呼叫 `upscale`；後端僅以 `keep_aspect_ratio` 欄位作標記，不自行重算。計算後長邊不得超過 4096（`validate_dimensions` 上限），超出則拒絕。
 - 寬或高為 0 時回傳「target dimensions must be non-zero」。
 
 ## 格式與品質
@@ -70,6 +71,8 @@ sequenceDiagram
 | ICO | 超過 256×256 時以 Lanczos3 等比縮到 256 以內 | `converter.rs:160` |
 | PNM | 一律輸出二進位 PPM（RGB8），透明度被捨棄 | `converter.rs:141`、`converter.rs:167` |
 | AVIF | 不支援；`converter.rs` 模組說明提到 AVIF，但列舉與編碼都沒有 | `converter.rs:1` |
+| 輸出資料夾 | `settings.output_folder` 為 `null` 時放大結果寫入原圖同資料夾（現行行為）；非 null 時寫入該資料夾。必須透過原生資料夾選取器取得，並經後端 `check_write` 允許清單檢查；不得以自由文字輸入任意路徑 | `src-tauri/src/settings.rs`、`src/app.js` |
+| 檔名樣板 | `settings.filename_template`，變數 `{name}`（原檔名不含副檔名）、`{scale}`（目標短邊，保持長寬比時為短邊；否則為目標寬度）、`{ext}`（副檔名）。後端 sanitize 禁止 `/ \ : * ? " < > |` 與 `..`，限制為單一檔名元素 | `src/app.js` `resolveOutputPath()`，後端 `settings.rs` |
 
 ## 預覽、匯出與轉換
 

@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, atomic::{AtomicU64, AtomicU32, Ordering}};
 use std::time::Instant;
 
@@ -84,6 +84,45 @@ pub enum UpscaleProgress {
     Completed { job_id: String, result: UpscaleResultDto },
     Cancelled { job_id: String },
     Failed { job_id: String, error: String },
+}
+
+/// Single item in a batch upscale request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemDto {
+    pub input_path: String,
+    pub output_path: Option<String>,
+}
+
+/// Payload for the `batch_upscale` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchUpscaleDto {
+    pub items: Vec<BatchItemDto>,
+    pub backend: String,
+    pub algorithm: String,
+    pub keep_aspect_ratio: bool,
+    pub target_width: u32,
+    pub target_height: u32,
+    pub quality: Option<u8>,
+}
+
+/// Result of the `batch_upscale` command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchUpscaleResultDto {
+    pub batch_id: String,
+    pub total: usize,
+}
+
+/// Progress event sent via Channel during batch upscale.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "event")]
+pub enum BatchProgress {
+    Started { batch_id: String, total: usize },
+    Progress { batch_id: String, done: usize, total: usize, current: String },
+    ItemCompleted { batch_id: String, done: usize, total: usize, current: String, output_path: String },
+    ItemFailed { batch_id: String, done: usize, total: usize, current: String, error: String },
+    Completed { batch_id: String, total: usize, successes: usize, failures: usize },
+    Cancelled { batch_id: String },
+    Failed { batch_id: String, error: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -676,60 +715,91 @@ pub fn select_save_path(
     Ok(selected.map(|p| p.to_string_lossy().to_string()))
 }
 
-/// Upscale an image according to `job`, reporting progress via `Channel`.
-///
-/// GPU backend is attempted first when requested; on any GPU error the job is
-/// retried on the CPU with Lanczos3 and `used_fallback` is set to `true`.
-/// Progress events are sent via the provided Channel.
+/// Open a native folder picker dialog and return the selected folder path.
+/// The selected path is added to the write allowlist so it can be used as
+/// the output folder for settings persistence and batch upscale.
 #[tauri::command]
-pub async fn upscale(
-    job: UpscaleJobDto,
-    on_event: Channel<UpscaleProgress>,
+pub fn select_output_folder(
     state: State<'_, AppState>,
-    app: AppHandle,
+) -> Result<Option<String>, String> {
+    let selected = FileDialog::new().pick_folder();
+    if let Some(ref path) = selected {
+        let path_str = path.to_string_lossy().to_string();
+        state.allow_write(&path_str);
+    }
+    Ok(selected.map(|p| p.to_string_lossy().to_string()))
+}
+
+/// Open a native multi-file picker dialog and return the selected image paths.
+/// Each selected path is added to the read allowlist so it can be used as
+/// input for upscale or batch_upscale.
+#[tauri::command]
+pub fn select_multiple_images(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let selected: Vec<PathBuf> = FileDialog::new()
+        .add_filter(
+            "Image",
+            &["png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "ico", "pnm", "pbm", "pgm", "ppm", "pam"],
+        )
+        .pick_files()
+        .unwrap_or_default();
+    let mut paths = Vec::new();
+    for path in selected {
+        let path_str = path.to_string_lossy().to_string();
+        state.allow_read(&path_str);
+        paths.push(path_str);
+    }
+    Ok(paths)
+}
+
+/// Core upscale logic shared by `upscale` and `batch_upscale`.
+/// `on_event` is `None` in batch mode (per-item progress is not streamed).
+async fn execute_upscale(
+    job_id: String,
+    dto: UpscaleJobDto,
+    input_path: PathBuf,
+    output_path: PathBuf,
+    backend: Backend,
+    algorithm: Algorithm,
+    on_event: Option<&Channel<UpscaleProgress>>,
+    state: &AppState,
+    app: &AppHandle,
 ) -> Result<UpscaleResultDto, String> {
-    let backend = parse_backend(&job.backend)?;
-    let algorithm = parse_algorithm(&job.algorithm)?;
-
-    // Validate dimensions against limits (R5)
-    validate_dimensions(job.target_width, job.target_height)?;
-
-    let input_path = PathBuf::from(&job.input_path);
-    let output_path = PathBuf::from(&job.output_path);
-    let job_id = next_job_id();
+    // Build domain job from DTO
     let job = build_job(
         &job_id,
-        &job,
-        input_path.clone(),
-        output_path.clone(),
+        &dto,
+        input_path,
+        output_path,
         backend,
         algorithm,
     );
 
     // Check path permissions
     state.check_read(&job.input_path.to_string_lossy())?;
-    // Check write permission for output path (do NOT allow_write first - that bypasses validation)
     state.check_write(&job.output_path.to_string_lossy())?;
 
     // Register job
     if !state.start_job(&job_id) {
         return Err("another upscale job is running".to_string());
     }
-    send_progress(&on_event, UpscaleProgress::Started { job_id: job_id.clone() });
+    if let Some(channel) = on_event {
+        let _ = channel.send(UpscaleProgress::Started { job_id: job_id.clone() });
+    }
 
     let image = Converter::load_image(job.input_path.as_path()).map_err(|e| e.to_string())?;
 
-    // Send loading progress
-    send_progress(&on_event, UpscaleProgress::Progress {
-        stage: "loading".to_string(),
-        percent: 5,
-        message: "Image loaded, starting upscale".to_string(),
-    });
+    if let Some(channel) = on_event {
+        let _ = channel.send(UpscaleProgress::Progress {
+            stage: "loading".to_string(),
+            percent: 5,
+            message: "Image loaded, starting upscale".to_string(),
+        });
+    }
 
     // Clone channel for use in background task
-    let on_event_clone = on_event.clone();
-
-    // Run upscale in background thread to keep UI responsive
+    let on_event_clone = on_event.cloned();
     let job_clone = job.clone();
     let job_id_clone = job_id.clone();
     let app_clone = app.clone();
@@ -737,17 +807,19 @@ pub async fn upscale(
     let result = tokio::task::spawn_blocking(move || {
         // Access state via AppHandle (which is 'static)
         let state_clone = app_clone.state::<AppState>().inner();
-        
+
         // Check for cancellation before starting
         if state_clone.running_jobs.lock().unwrap().contains(&job_id_clone) == false {
             return Err("job cancelled before start".to_string());
         }
 
-        send_progress(&on_event_clone, UpscaleProgress::Progress {
-            stage: "upscaling".to_string(),
-            percent: 10,
-            message: "Upscaling...".to_string(),
-        });
+        if let Some(channel) = &on_event_clone {
+            let _ = channel.send(UpscaleProgress::Progress {
+                stage: "upscaling".to_string(),
+                percent: 10,
+                message: "Upscaling...".to_string(),
+            });
+        }
 
         let (upscaled, used_fallback, fallback_reason) = match backend {
             Backend::Gpu => match GpuUpscaler::new().and_then(|gpu| gpu.upscale(&job_clone, &image)) {
@@ -755,11 +827,13 @@ pub async fn upscale(
                 Err(gpu_err) => {
                     // GPU unavailable or execution failed: fall back to CPU with Lanczos3.
                     let fallback_reason = gpu_err.to_string();
-                    send_progress(&on_event_clone, UpscaleProgress::Progress {
-                        stage: "fallback".to_string(),
-                        percent: 50,
-                        message: format!("GPU failed, falling back to CPU: {}", fallback_reason),
-                    });
+                    if let Some(channel) = &on_event_clone {
+                        let _ = channel.send(UpscaleProgress::Progress {
+                            stage: "fallback".to_string(),
+                            percent: 50,
+                            message: format!("GPU failed, falling back to CPU: {}", fallback_reason),
+                        });
+                    }
                     let mut cpu_job = job_clone.clone();
                     cpu_job.algorithm = Algorithm::Lanczos3;
                     let cpu = CpuUpscaler;
@@ -781,11 +855,13 @@ pub async fn upscale(
             return Err("job cancelled during upscale".to_string());
         }
 
-        send_progress(&on_event_clone, UpscaleProgress::Progress {
-            stage: "saving".to_string(),
-            percent: 90,
-            message: "Saving output...".to_string(),
-        });
+        if let Some(channel) = &on_event_clone {
+            let _ = channel.send(UpscaleProgress::Progress {
+                stage: "saving".to_string(),
+                percent: 90,
+                message: "Saving output...".to_string(),
+            });
+        }
 
         let output_format = parse_image_format(&format_from_path(job_clone.output_path.as_path()))?;
         Converter::save_image(
@@ -824,16 +900,56 @@ pub async fn upscale(
     // Finish job
     state.finish_job(&job_id);
 
-    match result {
+    match &result {
         Ok(dto) => {
-            send_progress(&on_event, UpscaleProgress::Completed { job_id, result: dto.clone() });
-            Ok(dto)
+            if let Some(channel) = on_event {
+                let _ = channel.send(UpscaleProgress::Completed { job_id, result: dto.clone() });
+            }
         }
         Err(e) => {
-            send_progress(&on_event, UpscaleProgress::Failed { job_id, error: e.clone() });
-            Err(e)
+            if let Some(channel) = on_event {
+                let _ = channel.send(UpscaleProgress::Failed { job_id, error: e.clone() });
+            }
         }
     }
+
+    result
+}
+
+/// Upscale an image according to `job`, reporting progress via `Channel`.
+///
+/// GPU backend is attempted first when requested; on any GPU error the job is
+/// retried on the CPU with Lanczos3 and `used_fallback` is set to `true`.
+/// Progress events are sent via the provided Channel.
+#[tauri::command]
+pub async fn upscale(
+    job: UpscaleJobDto,
+    on_event: Channel<UpscaleProgress>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<UpscaleResultDto, String> {
+    let backend = parse_backend(&job.backend)?;
+    let algorithm = parse_algorithm(&job.algorithm)?;
+
+    // Validate dimensions against limits (R5)
+    validate_dimensions(job.target_width, job.target_height)?;
+
+    let input_path = PathBuf::from(&job.input_path);
+    let output_path = PathBuf::from(&job.output_path);
+    let job_id = next_job_id();
+
+    execute_upscale(
+        job_id,
+        job,
+        input_path,
+        output_path,
+        backend,
+        algorithm,
+        Some(&on_event),
+        &state,
+        &app,
+    )
+    .await
 }
 
 /// Cancel an in-flight upscale job.
@@ -843,6 +959,162 @@ pub fn cancel_job(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.cancel_job(&id)
+}
+
+/// Generate a default output path next to the input file with `_upscaled` suffix.
+fn generate_default_output_path(input_path: &str) -> PathBuf {
+    let path = PathBuf::from(input_path);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("png");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}_upscaled.{ext}"))
+}
+
+/// Batch upscale: process multiple images sequentially, reporting progress via `Channel`.
+/// Cancellation is honored at item boundaries; an in-progress item finishes before stopping.
+#[tauri::command]
+pub async fn batch_upscale(
+    dto: BatchUpscaleDto,
+    on_event: Channel<BatchProgress>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<BatchUpscaleResultDto, String> {
+    validate_dimensions(dto.target_width, dto.target_height)?;
+
+    let batch_id = next_job_id();
+    let total = dto.items.len();
+
+    if total == 0 {
+        return Err("no items to process".to_string());
+    }
+
+    // Check read permission for all input paths up front
+    for item in &dto.items {
+        state.check_read(&item.input_path)?;
+    }
+
+    if !state.start_job(&batch_id) {
+        return Err("another job is running".to_string());
+    }
+
+    let _ = on_event.send(BatchProgress::Started {
+        batch_id: batch_id.clone(),
+        total,
+    });
+
+    let mut successes = 0usize;
+    let mut failures = 0usize;
+
+    for (index, item) in dto.items.iter().enumerate() {
+        // Honor cancellation at item boundaries
+        if !state.is_running(&batch_id) {
+            let _ = on_event.send(BatchProgress::Cancelled {
+                batch_id: batch_id.clone(),
+            });
+            break;
+        }
+
+        let current = item.input_path.clone();
+        let done = index + 1;
+
+        let _ = on_event.send(BatchProgress::Progress {
+            batch_id: batch_id.clone(),
+            done,
+            total,
+            current: current.clone(),
+        });
+
+        let output_path = match &item.output_path {
+            Some(p) => PathBuf::from(p),
+            None => generate_default_output_path(&item.input_path),
+        };
+
+        let backend = match parse_backend(&dto.backend) {
+            Ok(b) => b,
+            Err(e) => {
+                failures += 1;
+                let _ = on_event.send(BatchProgress::ItemFailed {
+                    batch_id: batch_id.clone(),
+                    done,
+                    total,
+                    current: current.clone(),
+                    error: e,
+                });
+                continue;
+            }
+        };
+        let algorithm = match parse_algorithm(&dto.algorithm) {
+            Ok(a) => a,
+            Err(e) => {
+                failures += 1;
+                let _ = on_event.send(BatchProgress::ItemFailed {
+                    batch_id: batch_id.clone(),
+                    done,
+                    total,
+                    current: current.clone(),
+                    error: e,
+                });
+                continue;
+            }
+        };
+
+        let job_dto = UpscaleJobDto {
+            input_path: item.input_path.clone(),
+            output_path: output_path.to_string_lossy().to_string(),
+            backend: dto.backend.clone(),
+            algorithm: dto.algorithm.clone(),
+            target_width: dto.target_width,
+            target_height: dto.target_height,
+            jpeg_quality: dto.quality,
+        };
+
+        let item_job_id = format!("{batch_id}-item-{index}");
+        match execute_upscale(
+            item_job_id,
+            job_dto,
+            PathBuf::from(&item.input_path),
+            output_path.clone(),
+            backend,
+            algorithm,
+            None, // batch mode: no per-item upscale channel
+            &state,
+            &app,
+        )
+        .await
+        {
+            Ok(_) => {
+                successes += 1;
+                let _ = on_event.send(BatchProgress::ItemCompleted {
+                    batch_id: batch_id.clone(),
+                    done,
+                    total,
+                    current: current.clone(),
+                    output_path: output_path.to_string_lossy().to_string(),
+                });
+            }
+            Err(e) => {
+                failures += 1;
+                let _ = on_event.send(BatchProgress::ItemFailed {
+                    batch_id: batch_id.clone(),
+                    done,
+                    total,
+                    current: current.clone(),
+                    error: e,
+                });
+            }
+        }
+    }
+
+    state.finish_job(&batch_id);
+
+    let _ = on_event.send(BatchProgress::Completed {
+        batch_id: batch_id.clone(),
+        total,
+        successes,
+        failures,
+    });
+
+    Ok(BatchUpscaleResultDto { batch_id, total })
 }
 
 /// Export (re-encode) an already-upscaled image to the user-chosen path.

@@ -2,9 +2,9 @@
 
 | 文件資訊 | 內容 |
 | --- | --- |
-| 版本／建立／更新 | v1.1／2026-11-22／2026-11-22 |
-| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）程式碼建立：前後端組成、歸屬原則、功能對照、IPC 指令契約、已知落差。v1.1 「FSR 1.0」落差補本機實測錯誤訊息；註明 Anime4K、NIS 執行時 panic |
-| 權威來源 | 前端 `src/index.html`、`src/app.js`；後端 `src-tauri/src/main.rs`（指令註冊）、`src-tauri/src/commands.rs`（指令實作） |
+| 版本／建立／更新 | v1.2／2026-11-23／2026-11-23 |
+| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：前後端組成、歸屬原則、功能對照、IPC 指令契約、已知落差。v1.1 「FSR 1.0」落差補本機實測錯誤訊息；註明 Anime4K、NIS 執行時 panic。v1.2 新增 `read_settings`/`write_settings`/`add_recent_file`/`batch_upscale`/`select_output_folder`/`select_multiple_images` 六個 IPC 指令，以及 `settings.rs` 設定檔模組 |
+| 權威來源 | 前端 `src/index.html`、`src/app.js`；後端 `src-tauri/src/main.rs`（指令註冊）、`src-tauri/src/commands.rs`（指令實作）、`src-tauri/src/settings.rs`（設定檔） |
 
 ## 組成
 
@@ -49,7 +49,6 @@ flowchart LR
 | 取消 | `#btnCancel`（`app.js:255`） | `cancel_job` | `commands.rs:291`，空實作 |
 | 匯出（另存放大結果） | `#btnExport`（`app.js:266`） | `select_save_path` → `export_image` | `commands.rs:213`、`commands.rs:298` |
 | 格式轉換（另存原圖） | `#btnConvert`（`app.js:301`），參數來自 `#convertFormat`、`#convertQuality` | `select_save_path` → `convert_image` | `commands.rs:213`、`commands.rs:314` |
-| 範本殘留 | 無 | `greet` | `main.rs:14`，前端未呼叫 |
 
 ## IPC 指令契約
 
@@ -64,6 +63,12 @@ Tauri 會把頂層參數的 Rust 蛇形命名（snake_case）對應成前端的�
 | `cancel_job` | `id`：工作代號 | 無 | 不會失敗（未實作） |
 | `export_image` | `path`：放大結果路徑；`outputPath`；`format`；`quality` | 無 | 格式無效、品質超出範圍、讀寫失敗訊息 |
 | `convert_image` | `inputPath`：原圖路徑；`outputPath`；`format`；`quality` | 無 | 同 `export_image` |
+| `read_settings` | 無 | 設定物件 `{ backend, algorithm, quality, output_folder, keep_aspect_ratio, filename_template, recent_files: string[] }` | 讀檔失敗訊息；檔案不存在時回傳預設值 |
+| `write_settings` | 設定物件（全部或部分欄位） | `{ ok: true }` | 寫檔失敗訊息 |
+| `add_recent_file` | `path`：圖檔絕對路徑 | 更新後的設定物件（含 recent_files） | 讀寫失敗訊息 |
+| `batch_upscale` | `items: [{input_path, output_path?}]`；`backend`, `algorithm`, `keep_aspect_ratio`, `target_width`, `target_height`, `quality` | `{ batch_id, total }`；進度經 `batch_progress` 事件回報 | 佇列建立失敗訊息；單張失敗不中斷，記錄後繼續 |
+| `select_output_folder` | 無 | 選取的資料夾絕對路徑；取消時 `null` | 不會失敗 |
+| `select_multiple_images` | 無 | 選取的多個圖檔絕對路徑陣列；取消時空陣列 | 不會失敗 |
 
 各欄位的業務規則（允許值、品質範圍、輸出格式判斷）見[業務邏輯](business-logic.md)。
 
@@ -72,8 +77,8 @@ Tauri 會把頂層參數的 Rust 蛇形命名（snake_case）對應成前端的�
 以下依程式碼判讀，記錄現況，修正需經使用者排入任務。
 
 - **GPU 的「FSR 1.0」無法從畫面使用。** 前端送出選項值 `FSR 1.0`（`app.js:38`、`app.js:77`），後端轉小寫為 `fsr 1.0`，不在 `parse_algorithm` 接受的 `fsr1_0`／`fsr-1-0`／`fsr1` 內（`commands.rs:87`），回傳「invalid algorithm 'fsr 1.0': …」（2026-11-22 本機實測）。`Anime4K`、`NIS` 可通過解析，但執行時因著色器錯誤 panic（見[系統架構](system-architecture.md)）。
-- **進度條是前端模擬。** `upscale` 是同步指令，回傳時放大已完成；前端之後才以計時器把進度從 0% 跑到 100%（`app.js:232`）。
+- **進度條後端回報進度。** `upscale` 為非同步指令，透過 `Channel<UpscaleProgress>` 回報 Started／Progress／Completed／Failed；前端顯示實際進度（`app.js` `upscaleChannel.onmessage`）。舊說「進度條是前端模擬」已不適用。
 - **取消沒有作用。** `cancel_job` 為空實作（`commands.rs:292`），前端只重設畫面。
 - **拖放不讀取拖入的檔案。** 放下時改為開啟檔案對話框（`app.js:192`）；`index.html` 的 `#fileInput` 未被使用。
 - **未使用的外掛。** `tauri-plugin-dialog` 有初始化（`main.rs:21`）且列在 `package.json`，但前端未呼叫，對話框改用 rfd；`tauri-plugin-shell` 列在 `Cargo.toml` 但未初始化。
-- **除錯輸出殘留。** `select_save_path` 以 `eprintln!` 印出參數（`commands.rs:214`、`commands.rs:224`），前端匯出／轉換流程有 `console.log`。
+- **除錯輸出殘留。** `commands.rs` 已無 `eprintln!`；僅剩 `src-tauri/src/gpu.rs:60` 1 處 `eprintln!`（由 [#3] 程式碼清理與 CI 建置 R1 改用 `tracing::warn!`）；前端 `src/app.js` 4 處 `console.log`（由 [#3] R2 移除）。`select_save_path` 並無 `eprintln!` 輸出，上述行號已隨版本變動。

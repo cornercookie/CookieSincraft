@@ -31,6 +31,19 @@ const convertFormat = $("convertFormat")
 const convertQuality = $("convertQuality")
 const convertQualityValue = $("convertQualityValue")
 const btnConvert = $("btnConvert")
+// Batch elements
+const btnSelectBatch = $("btnSelectBatch")
+const btnStartBatch = $("btnStartBatch")
+const batchFileList = $("batchFileList")
+const batchProgressFill = $("batchProgressFill")
+const batchProgressPct = $("batchProgressPct")
+const batchStatus = $("batchStatus")
+// Settings elements
+const keepAspectRatio = $("keepAspectRatio")
+const outputFolder = $("outputFolder")
+const btnChooseOutputFolder = $("btnChooseOutputFolder")
+const filenameTemplate = $("filenameTemplate")
+const recentFilesEl = $("recentFiles")
 
 // Toast container (R4)
 const toastContainer = $("toastContainer")
@@ -42,10 +55,21 @@ const ALGORITHMS = {
 }
 
 // ---- State ----
-let currentFile = null   // { path, name }
+let currentFile = null   // { path, name, width, height }
 let currentJobId = null
 let outputPath = null
 let upscaleChannel = null
+let settings = {
+  backend: "cpu",
+  algorithm: "Lanczos3",
+  quality: 85,
+  output_folder: null,
+  keep_aspect_ratio: false,
+  filename_template: "{name}_upscaled_{scale}x.{ext}",
+  recent_files: [],
+}
+let batchFiles = []
+let batchChannel = null
 
 // ---- Utils ----
 function setStatus(msg, kind = "muted") {
@@ -58,6 +82,209 @@ function setProgress(pct) {
   const v = Math.max(0, Math.min(100, pct))
   progressFill.style.width = v + "%"
   progressPct.textContent = v + "%"
+}
+
+// ---- Settings persistence ----
+async function loadSettings() {
+  try {
+    settings = await invoke("read_settings")
+    backendSelect.value = settings.backend || "cpu"
+    algorithmSelect.value = settings.algorithm || "Lanczos3"
+    qualityInput.value = settings.quality ?? 85
+    qualityValue.textContent = qualityInput.value
+    outputFolder.value = settings.output_folder || ""
+    filenameTemplate.value = settings.filename_template || "{name}_upscaled_{scale}x.{ext}"
+    keepAspectRatio.checked = settings.keep_aspect_ratio || false
+    populateAlgorithms()
+    renderRecentFiles(settings.recent_files || [])
+  } catch (err) {
+    console.error("Load settings failed:", err)
+  }
+}
+
+async function saveSettings() {
+  try {
+    settings = {
+      ...settings,
+      backend: backendSelect.value,
+      algorithm: algorithmSelect.value,
+      quality: Number(qualityInput.value),
+      output_folder: outputFolder.value || null,
+      keep_aspect_ratio: keepAspectRatio.checked,
+      filename_template: filenameTemplate.value,
+    }
+    await invoke("write_settings", settings)
+  } catch (err) {
+    console.error("Save settings failed:", err)
+    setStatus("Save settings failed: " + String(err), "err")
+  }
+}
+
+async function addRecentFile(path) {
+  try {
+    settings = await invoke("add_recent_file", { path })
+    renderRecentFiles(settings.recent_files || [])
+  } catch (err) {
+    console.error("Add recent file failed:", err)
+  }
+}
+
+function renderRecentFiles(files) {
+  recentFilesEl.innerHTML = ""
+  if (!files || files.length === 0) {
+    recentFilesEl.textContent = "(none)"
+    recentFilesEl.className = "recent-files empty"
+    return
+  }
+  recentFilesEl.className = "recent-files"
+  const list = document.createElement("div")
+  list.className = "recent-list"
+  for (const path of files) {
+    const item = document.createElement("div")
+    item.className = "recent-item"
+    item.title = path
+    item.textContent = path.split(/[/\\]/).pop()
+    item.style.cursor = "pointer"
+    item.onclick = async () => {
+      try {
+        await loadImagePath(path)
+      } catch (err) {
+        showToast("Failed to load: " + String(err), "err")
+      }
+    }
+    list.appendChild(item)
+  }
+  recentFilesEl.appendChild(list)
+}
+
+// Resolve output path from settings: output_folder + filename_template.
+// Sanitizes the template to block path traversal.
+function resolveOutputPath(inputPath) {
+  const outFolder = settings.output_folder
+  const template = settings.filename_template || "{name}_upscaled_{scale}x.{ext}"
+
+  const inputName = inputPath.split(/[/\\]/).pop()
+  const dot = inputName.lastIndexOf(".")
+  const name = dot === -1 ? inputName : inputName.slice(0, dot)
+  const ext = dot === -1 ? "png" : inputName.slice(dot + 1)
+
+  const [tw, th] = resolutionSelect.value.split("x").map(Number)
+  const scale = keepAspectRatio.checked ? Math.min(tw, th) : tw
+
+  let filename = template
+    .replace(/\{name\}/g, name)
+    .replace(/\{scale\}/g, scale)
+    .replace(/\{ext\}/g, ext)
+
+  // Sanitize: block path traversal characters (Security X3)
+  filename = filename.replace(/[\\/:*?"<>|]/g, "_")
+  if (filename === ".." || filename.includes("..")) filename = "output." + ext
+
+  if (outFolder) {
+    return outFolder.endsWith("\\") || outFolder.endsWith("/")
+      ? outFolder + filename
+      : outFolder + "/" + filename
+  }
+  const lastSep = Math.max(inputPath.lastIndexOf("/"), inputPath.lastIndexOf("\\"))
+  const dir = lastSep === -1 ? "" : inputPath.slice(0, lastSep + 1)
+  return dir + filename
+}
+
+// ---- Batch upscale ----
+function renderBatchFileList() {
+  batchFileList.innerHTML = ""
+  if (!batchFiles || batchFiles.length === 0) {
+    batchFileList.textContent = "(none)"
+    batchFileList.className = "batch-file-list empty"
+    btnStartBatch.disabled = true
+    return
+  }
+  batchFileList.className = "batch-file-list"
+  const list = document.createElement("div")
+  list.className = "batch-list"
+  for (const path of batchFiles) {
+    const item = document.createElement("div")
+    item.className = "batch-item"
+    item.title = path
+    item.textContent = path.split(/[/\\]/).pop()
+    list.appendChild(item)
+  }
+  batchFileList.appendChild(list)
+  btnStartBatch.disabled = false
+}
+
+async function startBatchUpscale() {
+  if (batchFiles.length === 0) return
+  const [width, height] = resolutionSelect.value.split("x").map(Number)
+
+  const items = batchFiles.map(inputPath => ({
+    input_path: inputPath,
+    output_path: null, // backend resolves via output_folder + filename_template
+  }))
+
+  try {
+    batchChannel = new Channel()
+    batchChannel.onmessage = (event) => {
+      const data = event.data
+      switch (data.event) {
+        case "Started":
+          batchStatus.textContent = `Batch started: ${data.total} items`
+          break
+        case "Progress": {
+          const pct = Math.round((data.done / data.total) * 100)
+          batchProgressFill.style.width = pct + "%"
+          batchProgressPct.textContent = pct + "%"
+          batchStatus.textContent = `Processing: ${data.current.split(/[/\\]/).pop()}`
+          break
+        }
+        case "ItemCompleted":
+          batchStatus.textContent = `Completed: ${data.current.split(/[/\\]/).pop()}`
+          break
+        case "ItemFailed":
+          batchStatus.textContent = `Failed: ${data.current.split(/[/\\]/).pop()}`
+          break
+        case "Completed":
+          batchChannel = null
+          batchProgressFill.style.width = "100%"
+          batchProgressPct.textContent = "100%"
+          batchStatus.textContent = `Batch done: ${data.successes} succeeded, ${data.failures} failed`
+          btnStartBatch.disabled = false
+          btnSelectBatch.disabled = false
+          break
+        case "Cancelled":
+          batchChannel = null
+          batchStatus.textContent = "Batch cancelled"
+          btnStartBatch.disabled = false
+          btnSelectBatch.disabled = false
+          break
+        case "Failed":
+          batchChannel = null
+          batchStatus.textContent = "Batch failed: " + data.error
+          btnStartBatch.disabled = false
+          btnSelectBatch.disabled = false
+          break
+      }
+    }
+
+    btnStartBatch.disabled = true
+    btnSelectBatch.disabled = true
+
+    await invoke("batch_upscale", {
+      items,
+      backend: backendSelect.value,
+      algorithm: algorithmSelect.value,
+      keep_aspect_ratio: keepAspectRatio.checked,
+      target_width: width,
+      target_height: height,
+      quality: Number(qualityInput.value) || undefined,
+    }, batchChannel)
+  } catch (err) {
+    console.error("Batch upscale error:", err)
+    batchStatus.textContent = "Batch failed: " + String(err)
+    btnStartBatch.disabled = false
+    btnSelectBatch.disabled = false
+    batchChannel = null
+  }
 }
 
 function resetJob() {
@@ -182,6 +409,8 @@ async function loadImageFromBase64(file) {
         currentFile = {
           path: result.temp_path,
           name: file.name,
+          width: result.image_meta.width,
+          height: result.image_meta.height,
         }
         fileName.textContent = currentFile.name
         fileName.className = "file-name"
@@ -195,6 +424,7 @@ async function loadImageFromBase64(file) {
         btnExport.disabled = false
         btnConvert.disabled = false
         outputPath = null
+        await addRecentFile(result.temp_path)
         resolve()
       } catch (err) {
         console.error(err)
@@ -251,6 +481,8 @@ async function loadImagePath(path) {
     currentFile = {
       path,
       name: path.split(/[/\\]/).pop(),
+      width: meta.width,
+      height: meta.height,
     }
     fileName.textContent = currentFile.name
     fileName.className = "file-name"
@@ -267,6 +499,7 @@ async function loadImagePath(path) {
     btnExport.disabled = false
     btnConvert.disabled = false
     outputPath = null
+    await addRecentFile(path)
   } catch (err) {
     console.error(err)
     setStatus("Load failed: " + (err?.message ?? String(err)), "err")
@@ -354,6 +587,44 @@ dropZone.addEventListener("drop", async (e) => {
   await loadImageFromBase64(file)
 })
 
+// ---- Choose output folder (native folder picker) ----
+btnChooseOutputFolder.addEventListener("click", async () => {
+  try {
+    const folder = await invoke("select_output_folder")
+    if (!folder) return
+    outputFolder.value = folder
+    await saveSettings()
+    setStatus(`Output folder: ${folder}`, "ok")
+  } catch (err) {
+    console.error("Choose output folder failed:", err)
+    setStatus("Choose output folder failed: " + String(err), "err")
+  }
+})
+
+// ---- Settings change handlers ----
+backendSelect.addEventListener("change", () => {
+  populateAlgorithms()
+  saveSettings()
+})
+algorithmSelect.addEventListener("change", saveSettings)
+qualityInput.addEventListener("change", saveSettings)
+outputFolder.addEventListener("change", saveSettings)
+filenameTemplate.addEventListener("change", saveSettings)
+keepAspectRatio.addEventListener("change", saveSettings)
+
+// ---- Batch events ----
+btnSelectBatch.addEventListener("click", async () => {
+  try {
+    batchFiles = await invoke("select_multiple_images")
+    renderBatchFileList()
+  } catch (err) {
+    console.error("Select multiple images failed:", err)
+    setStatus("Select multiple images failed: " + String(err), "err")
+  }
+})
+
+btnStartBatch.addEventListener("click", startBatchUpscale)
+
 // ---- Start Upscale ----
 btnStart.addEventListener("click", async () => {
   if (!currentFile) {
@@ -362,7 +633,27 @@ btnStart.addEventListener("click", async () => {
   }
 
   const [width, height] = resolutionSelect.value.split("x").map(Number)
-  const out = generateOutputPath(currentFile.path)
+
+  let targetWidth = width
+  let targetHeight = height
+
+  // Keep aspect ratio: frontend pre-calculates by short side (Design: 前端預計算，後端僅標記)
+  if (keepAspectRatio.checked && currentFile.width && currentFile.height) {
+    const targetShort = Math.min(width, height)
+    const ratio = currentFile.width / currentFile.height
+    if (currentFile.width >= currentFile.height) {
+      targetHeight = targetShort
+      targetWidth = Math.round(targetShort * ratio)
+    } else {
+      targetWidth = targetShort
+      targetHeight = Math.round(targetShort / ratio)
+    }
+    // Clamp to 4096×4096 limit (validate_dimensions)
+    if (targetWidth > 4096) targetWidth = 4096
+    if (targetHeight > 4096) targetHeight = 4096
+  }
+
+  const out = resolveOutputPath(currentFile.path)
 
   // Overwrite confirmation (R2)
   const overwriteResult = await confirmOverwrite(out)
@@ -378,9 +669,10 @@ btnStart.addEventListener("click", async () => {
       output_path: outputPath,
       backend: backendSelect.value,
       algorithm: algorithmSelect.value,
-      target_width: width,
-      target_height: height,
+      target_width: targetWidth,
+      target_height: targetHeight,
       jpeg_quality: Number(qualityInput.value) || undefined,
+      keep_aspect_ratio: keepAspectRatio.checked,
     },
   }
 
@@ -417,6 +709,8 @@ btnStart.addEventListener("click", async () => {
           btnStart.disabled = false
           btnCancel.disabled = true
           btnExport.disabled = false
+          saveSettings()
+          addRecentFile(data.result.output_path)
           break
         case "Cancelled":
           currentJobId = null
@@ -446,9 +740,10 @@ btnStart.addEventListener("click", async () => {
         output_path: outputPath,
         backend: backendSelect.value,
         algorithm: algorithmSelect.value,
-        target_width: width,
-        target_height: height,
+        target_width: targetWidth,
+        target_height: targetHeight,
         jpeg_quality: Number(qualityInput.value) || undefined,
+        keep_aspect_ratio: keepAspectRatio.checked,
       },
       onEvent: upscaleChannel,
     })
@@ -483,12 +778,10 @@ btnExport.addEventListener("click", async () => {
   try {
     const defaultName = outputPath.split(/[/\\]/).pop() || "upscaled.png"
     const filters = saveFiltersFor(extOf(defaultName))
-    console.log("Calling select_save_path with:", { defaultName, filters })
     const savePath = await invoke("select_save_path", {
       defaultName,
       filters,
     })
-    console.log("select_save_path returned:", savePath)
     if (!savePath) {
       setStatus("Save cancelled", "warn")
       return
@@ -503,6 +796,8 @@ btnExport.addEventListener("click", async () => {
     })
     setStatus(`Exported to ${savePath}`, "ok")
     alert(`Image exported to ${savePath}`)
+    saveSettings()
+    addRecentFile(savePath)
   } catch (err) {
     console.error("Export error:", err)
     setStatus("Export failed: " + String(err), "err")
@@ -518,12 +813,10 @@ btnConvert.addEventListener("click", async () => {
   try {
     const defaultName = currentFile.name.replace(/\.[^.]+$/, "") + "." + convertFormat.value
     const filters = saveFiltersFor(extOf(defaultName))
-    console.log("Calling select_save_path for convert with:", { defaultName, filters })
     const savePath = await invoke("select_save_path", {
       defaultName,
       filters,
     })
-    console.log("select_save_path returned:", savePath)
     if (!savePath) {
       setStatus("Save cancelled", "warn")
       return
@@ -549,3 +842,4 @@ btnConvert.addEventListener("click", async () => {
 
 // ---- Init ----
 resetJob()
+loadSettings()
