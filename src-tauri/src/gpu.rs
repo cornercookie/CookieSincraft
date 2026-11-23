@@ -56,8 +56,9 @@ impl GpuUpscaler {
         // Error tracking to avoid panics on validation errors
         let error_flag = Arc::new(Mutex::new(false));
         let error_flag_clone = error_flag.clone();
-        device.on_uncaptured_error(Box::new(move |err| {
-            eprintln!("wgpu uncaptured error: {err:?}");
+        device.on_uncaptured_error(Box::new(move |_err| {
+            #[cfg(debug_assertions)]
+            tracing::warn!("wgpu uncaptured error");
             *error_flag_clone.lock().unwrap() = true;
         }));
 

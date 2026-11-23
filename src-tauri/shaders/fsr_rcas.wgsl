@@ -19,7 +19,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 
 @group(0) @binding(1) var source: texture_2d<f32>;
-@group(0) @binding(2) var sampler: sampler;
+@group(0) @binding(2) var smp: sampler;
 @group(0) @binding(3) var dest: texture_storage_2d<rgba8unorm, write>;
 
 fn luma(color: vec3<f32>) -> f32 {
@@ -53,11 +53,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv = vec2<f32>(pos) / vec2<f32>(dst_dims);
     let step = vec2<f32>(1.0) / tex_dims;
 
-    let c = rcas_load(source, sampler, uv);
-    let l = rcas_load(source, sampler, uv - vec2<f32>(step.x, 0.0));
-    let r = rcas_load(source, sampler, uv + vec2<f32>(step.x, 0.0));
-    let t = rcas_load(source, sampler, uv - vec2<f32>(0.0, step.y));
-    let b = rcas_load(source, sampler, uv + vec2<f32>(0.0, step.y));
+    let c = rcas_load(source, smp, uv);
+    let l = rcas_load(source, smp, uv - vec2<f32>(step.x, 0.0));
+    let r = rcas_load(source, smp, uv + vec2<f32>(step.x, 0.0));
+    let t = rcas_load(source, smp, uv - vec2<f32>(0.0, step.y));
+    let b = rcas_load(source, smp, uv + vec2<f32>(0.0, step.y));
 
     let sharpness = clamp(params.sharpness, 0.0, 1.0);
     // 0.2 stops default: sharpness 0.5 -> 0.5 stops = 0.2 is ~0.4 input sharpness

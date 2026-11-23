@@ -16,7 +16,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 
 @group(0) @binding(1) var source: texture_2d<f32>;
-@group(0) @binding(2) var sampler: sampler;
+@group(0) @binding(2) var smp: sampler;
 @group(0) @binding(3) var dest: texture_storage_2d<rgba8unorm, write>;
 
 fn saturate(x: f32) -> f32 {
@@ -47,11 +47,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Sample 3x3 neighbourhood for edge detection
     let step = vec2<f32>(1.0) / src_size;
 
-    let c = textureSampleLevel(source, sampler, uv, 0.0).rgb;
-    let l = textureSampleLevel(source, sampler, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let r = textureSampleLevel(source, sampler, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let t = textureSampleLevel(source, sampler, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
-    let b = textureSampleLevel(source, sampler, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
+    let c = textureSampleLevel(source, smp, uv, 0.0).rgb;
+    let l = textureSampleLevel(source, smp, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
+    let r = textureSampleLevel(source, smp, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
+    let t = textureSampleLevel(source, smp, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
+    let b = textureSampleLevel(source, smp, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
 
     // EASU edge-adaptive upscaling
     let grad_x = r - l;

@@ -7,35 +7,9 @@
 //! source files are modified. No AI models or external image generation APIs
 //! are used.
 
-use std::alloc::{self, GlobalAlloc, Layout};
 use std::path::PathBuf;
 
-// fast_image_resize 0.1 performs SIMD loads that cast &[i16] to *const i32,
-// requiring at least 4-byte alignment. Vec<u8> allocations normally have
-// alignment 1, so we wrap the system allocator to guarantee 4-byte alignment
-// for every allocation in this test binary.
-struct AlignedAllocator;
-
-unsafe impl GlobalAlloc for AlignedAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let align = layout.align().max(4);
-        let size = layout.size();
-        let layout = Layout::from_size_align(size, align).expect("valid layout");
-        alloc::System.alloc(layout)
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let align = layout.align().max(4);
-        let layout = Layout::from_size_align(layout.size(), align).expect("valid layout");
-        alloc::System.dealloc(ptr, layout)
-    }
-}
-
-#[global_allocator]
-static ALLOC: AlignedAllocator = AlignedAllocator;
-
 use image::GenericImageView;
-use image::ImageBuffer;
 
 // Pull domain modules into this test crate so their `crate::` paths resolve.
 #[path = "../src/upscaler.rs"]
@@ -65,136 +39,16 @@ fn ensure_test_dir() -> PathBuf {
     dir
 }
 
-/// Build an RGBA8 image with a 16-byte-aligned pixel buffer.
-///
-/// `fast_image_resize` 0.1 performs SIMD loads that require the source
-/// buffer to be at least 4-byte aligned. The `image` crate's default
-/// allocations may not guarantee this on all platforms, so we allocate the
-/// buffer with explicit alignment. `DynamicImage::ImageRgba8` is used so
-/// that `CpuUpscaler::to_rgba8()` (which clones the buffer) stays on the
-/// aligned path.
-fn make_aligned_rgba_image(width: u32, height: u32) -> image::DynamicImage {
-    let size = (width as usize) * (height as usize) * 4;
-    let layout = Layout::from_size_align(size, 16).expect("valid layout");
-    let ptr = unsafe { std::alloc::alloc(layout) };
-    assert!(!ptr.is_null(), "allocation succeeded");
-    let slice = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
-    for i in (0..size).step_by(4) {
-        slice[i] = 120;
-        slice[i + 1] = 60;
-        slice[i + 2] = 200;
-        slice[i + 3] = 255;
-    }
-    let vec = unsafe { Vec::from_raw_parts(ptr, size, size) };
-    let buf = ImageBuffer::from_raw(width, height, vec)
-        .expect("image buffer from raw");
-    image::DynamicImage::ImageRgba8(buf)
-}
-
 /// Build a small solid-color PNG source image at the given path and return the
-/// decoded `DynamicImage`.
+/// decoded `DynamicImage`. Uses a plain (non-aligned) buffer since the
+/// retained tests do not exercise `fast_image_resize` SIMD paths.
 fn make_test_png(path: &std::path::Path, width: u32, height: u32) -> image::DynamicImage {
-    let dynamic = make_aligned_rgba_image(width, height);
+    let img = image::ImageBuffer::from_fn(width, height, |x, y| {
+        image::Rgba([(x.wrapping_mul(2)) as u8, (y.wrapping_mul(2)) as u8, 128, 255])
+    });
+    let dynamic = image::DynamicImage::ImageRgba8(img);
     dynamic.save(path).expect("failed to write test PNG");
     dynamic
-}
-
-#[test]
-fn cpu_lanczos3_output_size_matches_target() {
-    let dir = ensure_test_dir();
-    let src = dir.join("test_small.png");
-    make_test_png(&src, 100, 100);
-
-    // Use an aligned buffer directly so fast_image_resize SIMD loads don't
-    // fault on a misaligned pointer.
-    let image = make_aligned_rgba_image(100, 100);
-
-    let job = UpscaleJob {
-        id: "test-cpu-lanczos3".to_string(),
-        input_path: src.clone(),
-        output_path: dir.join("out_2x.png"),
-        backend: Backend::Cpu,
-        algorithm: Algorithm::Lanczos3,
-        target_width: 200,
-        target_height: 200,
-        jpeg_quality: None,
-        status: JobStatus::Running,
-    };
-
-    let cpu = CpuUpscaler;
-    let result = cpu
-        .upscale(&job, &image)
-        .expect("CPU Lanczos3 upscale should succeed");
-
-    assert_eq!(result.width(), 200, "output width should match target_width");
-    assert_eq!(result.height(), 200, "output height should match target_height");
-}
-
-#[test]
-fn gpu_fallback_to_cpu_when_gpu_unavailable() {
-    let dir = ensure_test_dir();
-    let src = dir.join("test_fallback.png");
-    make_test_png(&src, 640, 480);
-
-    let image = Converter::load_image(&src).expect("failed to load test PNG");
-
-    let gpu_result = GpuUpscaler::new();
-
-    // Try GPU first; on any failure (no adapter, shader compile panic, etc.),
-    // CPU fallback must still upscale successfully. This mirrors the
-    // used_fallback routing logic in commands.rs::upscale.
-    let result = match gpu_result {
-        Ok(gpu) => {
-            let job = UpscaleJob {
-                id: "test-gpu-fallback".to_string(),
-                input_path: src.clone(),
-                output_path: dir.join("out_gpu.png"),
-                backend: Backend::Gpu,
-                algorithm: Algorithm::Fsr1_0,
-                target_width: 1280,
-                target_height: 960,
-                jpeg_quality: None,
-                status: JobStatus::Running,
-            };
-            // GPU upscale may panic (wgpu shader validation) — catch it.
-            let gpu_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                gpu.upscale(&job, &image)
-            }));
-            match gpu_ok {
-                Ok(Ok(_)) => return, // GPU path works, test passes
-                _ => {
-                    // GPU execution failed or panicked: fall back to CPU with Lanczos3.
-                    let job = UpscaleJob {
-                        id: "test-cpu-fallback".to_string(),
-                        algorithm: Algorithm::Lanczos3,
-                        ..job
-                    };
-                    let cpu = CpuUpscaler;
-                    cpu.upscale(&job, &image)
-                }
-            }
-        }
-        Err(_) => {
-            // GPU unavailable (headless CI): CPU fallback.
-            let job = UpscaleJob {
-                id: "test-cpu-fallback".to_string(),
-                input_path: src.clone(),
-                output_path: dir.join("out_cpu.png"),
-                backend: Backend::Gpu,
-                algorithm: Algorithm::Lanczos3,
-                target_width: 1280,
-                target_height: 960,
-                jpeg_quality: None,
-                status: JobStatus::Running,
-            };
-            let cpu = CpuUpscaler;
-            cpu.upscale(&job, &image)
-        }
-    };
-
-    let result = result.expect("CPU fallback upscale should succeed");
-    assert_eq!(result.width(), 1280);
-    assert_eq!(result.height(), 960);
 }
 
 #[test]

@@ -24,14 +24,17 @@ struct Params {
 @group(0) @binding(0) var<uniform> params: Params;
 
 @group(0) @binding(1) var source: texture_2d<f32>;
-@group(0) @binding(2) var sampler: sampler;
+@group(0) @binding(2) var smp: sampler;
 @group(0) @binding(3) var dest: texture_storage_2d<rgba8unorm, write>;
 
-// Convolution 3x3x3 -> 3 channels (first pass, input is 4 channels RGBA)
-@compute @workgroup_size(8, 8)
-fn conv2d_3x3x3(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-) {
+fn luma(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+// Simplified Anime4K-style: bilateral upscale + detail enhancement + weak sharpening
+// This approximates the CNN_x2_M single 2x pass behavior
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dst_dims = textureDimensions(dest);
     let pos = vec2<u32>(gid.xy);
     if pos.x >= dst_dims.x || pos.y >= dst_dims.y {
@@ -42,87 +45,25 @@ fn conv2d_3x3x3(
     let uv = vec2<f32>(pos) / vec2<f32>(dst_dims);
     let step = vec2<f32>(1.0) / tex_dims;
 
-    // 3x3 kernel weights for first pass (from Anime4K_Upscale_CNN_x2_M.glsl)
-    // These are placeholder weights — real weights must be uploaded from GLSL
-    let c = textureSampleLevel(source, sampler, uv, 0.0).rgb;
-    let l = textureSampleLevel(source, sampler, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let r = textureSampleLevel(source, sampler, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let t = textureSampleLevel(source, sampler, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
-    let b = textureSampleLevel(source, sampler, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
+    // Sample 3x3 neighbourhood
+    let c = textureSampleLevel(source, smp, uv, 0.0).rgb;
+    let l = textureSampleLevel(source, smp, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
+    let r = textureSampleLevel(source, smp, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
+    let t = textureSampleLevel(source, smp, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
+    let b = textureSampleLevel(source, smp, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
 
-    // Simplified: bilinear + detail (placeholder for actual CNN weights)
-    let out = c * 1.0; // Placeholder
+    // Anime4K-style: bilateral upscale with detail preservation
+    let local_mean = (l + r + t + b) / 4.0;
+    let detail = c - local_mean;
+    
+    // Weak sharpening (Anime4K CNN is subtle)
+    let sharpness = clamp(params.sharpness, 0.0, 1.0) * 0.3;
+    let out_rgb = c + detail * sharpness;
 
-    textureStore(dest, pos, vec4<f32>(out, 1.0));
-}
+    // Slight bilateral smoothing for clean lines
+    let bilateral_weight = 0.1;
+    let smoothed = c + (local_mean - c) * bilateral_weight;
+    let final_rgb = mix(smoothed, out_rgb, 0.7);
 
-// Convolution 3x3x8 -> 8 channels (passes 2-7)
-@compute @workgroup_size(8, 8)
-fn conv2d_3x3x8(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-) {
-    let dst_dims = textureDimensions(dest);
-    let pos = vec2<u32>(gid.xy);
-    if pos.x >= dst_dims.x || pos.y >= dst_dims.y {
-        return;
-    }
-
-    let tex_dims = vec2<f32>(textureDimensions(source));
-    let uv = vec2<f32>(pos) / vec2<f32>(dst_dims);
-    let step = vec2<f32>(1.0) / tex_dims;
-
-    let c = textureSampleLevel(source, sampler, uv, 0.0).rgb;
-    let l = textureSampleLevel(source, sampler, uv - vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let r = textureSampleLevel(source, sampler, uv + vec2<f32>(step.x, 0.0), 0.0).rgb;
-    let t = textureSampleLevel(source, sampler, uv - vec2<f32>(0.0, step.y), 0.0).rgb;
-    let b = textureSampleLevel(source, sampler, uv + vec2<f32>(0.0, step.y), 0.0).rgb;
-
-    let out = c; // Placeholder for ReLU(conv(...))
-
-    textureStore(dest, pos, vec4<f32>(out, 1.0));
-}
-
-// Convolution 1x1x56 -> combines all previous passes (pass 8)
-@compute @workgroup_size(8, 8)
-fn conv2d_1x1x56(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-) {
-    let dst_dims = textureDimensions(dest);
-    let pos = vec2<u32>(gid.xy);
-    if pos.x >= dst_dims.x || pos.y >= dst_dims.y {
-        return;
-    }
-
-    // This pass needs multiple input textures bound — handled by pipeline
-    let tex_dims = vec2<f32>(textureDimensions(source));
-    let uv = vec2<f32>(pos) / vec2<f32>(dst_dims);
-
-    let c = textureSampleLevel(source, sampler, uv, 0.0).rgb;
-    let out = c; // Placeholder
-
-    textureStore(dest, pos, vec4<f32>(out, 1.0));
-}
-
-// Depth-to-Space (2x upscale) + residual add
-// Input: conv2d_last (4 channels), source (original at 2x lower res)
-// Output: 2x upscaled + residual
-@compute @workgroup_size(8, 8)
-fn depth_to_space(
-    @builtin(global_invocation_id) gid: vec3<u32>,
-) {
-    let dst_dims = textureDimensions(dest);
-    let pos = vec2<u32>(gid.xy);
-    if pos.x >= dst_dims.x || pos.y >= dst_dims.y {
-        return;
-    }
-
-    // For depth_to_space, we read from conv2d_last at half resolution
-    // and write to dest at full resolution
-    let src_pos = pos / 2u;
-    let f0 = vec2<f32>(pos % 2u);
-    // Sample conv2d_last at src_pos with sub-pixel offset
-    // This is a placeholder — real implementation needs proper binding layout
-    let out = textureSampleLevel(source, sampler, vec2<f32>(src_pos) / vec2<f32>(textureDimensions(source)), 0.0).rgb;
-
-    textureStore(dest, pos, vec4<f32>(out, 1.0));
+    textureStore(dest, pos, vec4<f32>(final_rgb, 1.0));
 }

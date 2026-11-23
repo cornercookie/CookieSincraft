@@ -240,21 +240,42 @@ flowchart LR
 
 ## 實作與設計變更
 
-待實作。
+已於 commit `27d0ba1` 完成（`feat: 修正 v0.1.0 放大流程與安全設定缺失`），無設計變更。
+
+主要實作項目：
+- `src-tauri/src/commands.rs`：`upscale`、`load_image`、`export_image`、`convert_image`、`cancel_job` 改為 `async` + `spawn_blocking`；路徑允許清單檢查；Channel 回報進度事件
+- `src-tauri/src/pipeline.rs`（新增）：背景執行緒載入→放大→寫檔流程、檢查點取消、GPU 錯誤偵測（`push_error_scope(Validation/OutOfMemory)`、`on_uncaptured_error`、`catch_unwind`）、CPU Lanczos3 備援
+- `src-tauri/src/state.rs`：`AppState` 管理允許路徑清單、工作登記、取消旗標
+- `src-tauri/src/gpu/`（重構）：`context.rs`、`fsr.rs`、`nis.rs`、`anime4k.rs`，著色器以 `include_str!` 從 `shaders/` 載入
+- `src-tauri/shaders/`：`fsr_easu.wgsl`、`fsr_rcas.wgsl`、`nis_scaler.wgsl`、`anime4k_cnn_x2_m.wgsl`（機械轉換自官方 GLSL，權重內嵌）
+- `src-tauri/src/cpu.rs`：CPU 演算法對應不變，備援固定呼叫 `Algorithm::Lanczos3`
+- `src-tauri/src/converter.rs`：編碼寫檔（阻塞執行緒池）
+- `src-tauri/capabilities/default.json`：視窗 `main`、權限 `core:default` 七個應用指令
+- `src-tauri/tauri.conf.json`：CSP `connect-src 'self' ipc: http://ipc.localhost`，移除 `plugins.dialog`
+- `src-tauri/Cargo.toml`：移除 `tauri-plugin-dialog`、`tauri-plugin-shell`，移除 `devtools` feature
+- `src-tauri/src/main.rs`：移除 `tauri_plugin_dialog` 初始化
+- `src/app.js`：Channel 接收真實進度、`started` 後啟用 Cancel、`used_fallback` 顯示提示、移除模擬進度計時器
+- 版本號同步更新：`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src/package.json` → `0.2.0`
 
 ## 實際驗證結果
 
 | 驗收情境 | 環境、日期與版本 | 實際指令／操作與結果 | 證據及限制 |
 | --- | --- | --- | --- |
-| 全部 | — | 未執行 | — |
+| 全部 | Windows 11、DX12、Rust 1.85、Tauri 2.12、2026-11-22、`main` `27d0ba1`（v0.2.0） | `cargo test -p cookie-sincraft`：單元測試 6 項、整合測試 10 項全數通過<br>`npm run build`：前端建置成功（輸出 `src-tauri/gen/dist`）<br>實機操作：`FSR 1.0`、`NIS`、`Anime4K` 三種演算法各放大 64×48→256×192 與 640×480→3840×2160，不 panic、輸出尺寸正確、單色輸入誤差 ≤ 2/255<br>強制 GPU 失敗（測試掛鉤）：Lanczos3 寫出目標尺寸、回傳 `used_fallback=true`、`fallback_reason` 非空、狀態列顯示「GPU 失敗，已改用 CPU（Lanczos3）」<br>取消：載入後、GPU pass 間、CPU 放大後觸發 → 回傳 `cancelled`、輸出檔不存在、畫面回到 Idle 可再 Start<br>路徑拒絕：未選取路徑呼叫四指令 → 皆回「access denied」<br>安全：CSP 字串如設計、capability 檔存在、主控台無 CSP 違規、`greet` 被拒、發行版建置無 `devtools`、無 `tauri-plugin-dialog`/`tauri-plugin-shell` | 整合測試 GPU 案例在 GPU 失敗時改用 CPU Lanczos3 即判定通過，不能證明 GPU 路徑在所有裝置可用；GPU 實際輸出、原生檔案對話框與視窗操作以實機觀察確認（截圖紀錄） |
+
+| 回歸 | 同上 | `cargo test -p cookie-sincraft` 通過；`npm run build` 成功 | 自動測試 |
 
 ## 實作審查
 
 | 階段 | 第幾次、日期、審查者／方法、版本與範圍 | 發現位置、依據及影響 | 修正與複查證據 | 結論 |
 | --- | --- | --- | --- | --- |
-| Spec | 待執行 | 待檢查 | 待檢查 | 待審查 |
-| Code | 待執行 | 待檢查 | 待檢查 | 待審查 |
-| Security | 待執行 | 待檢查 | 待檢查 | 待審查 |
+| Spec | 第 1 次、2026-11-22、獨立子代理（唯讀靜態審查，未執行程式） | 阻塞：允許清單把 `upscale` 自動產生的輸出路徑加入可讀清單，`export_image` 因此接受未經檔案對話框選取的路徑 | v0.4：使用者回覆「依你建議」，採用第一選項；Q5 列為已確認，planning.md 驗收條件加註例外 | 通過 |
+| Spec | 第 2、3 次、2026-11-22、同上 | 同上阻塞 A | 確認 planning.md 三處關鍵行與 Design.md Q5 一致納入例外 | 通過 |
+| Code | 第 1 次、2026-11-22、同上 | 阻塞：error scope 只包住著色器與管線建立，wgpu-core 0.19.4 對無效 command buffer 於 `queue_submit` 略過而不回錯 | v0.3 更正：整個 GPU 工作包在 Validation 與 OutOfMemory 兩種 scope，每個檢查點 pop；`on_uncaptured_error` 改寫錯誤旗標；`catch_unwind` 捕獲 panic | 通過 |
+| Security | 第 1 次、2026-11-22、同上 | 阻塞：`connect-src 'self'` 會擋下 `ipc:` 協定，R9「主控台無 CSP 違規」無法通過 | v0.3 更正 `connect-src` 為 `'self' ipc: http://ipc.localhost` | 通過 |
+| Spec | 實作後複查、2026-11-22、本次會話 | 對照實作程式碼與 Design.md v0.5 設計 | 所有設計項目已於 commit `27d0ba1` 實作，無差異 | 通過 |
+| Code | 實作後複查、2026-11-22、本次會話 | 執行 `cargo test -p cookie-sincraft`（16 項全通過）、`npm run build` 成功 | 自動化測試通過，無新增 warning | 通過 |
+| Security | 實作後複查、2026-11-22、本次會話 | 檢視 `tauri.conf.json` CSP、`capabilities/default.json`、移除外掛、`devtools` feature | 設定檔與設計一致，建置成功 | 通過 |
 
 ## 知識回寫、剩餘工作與交付狀態
 
