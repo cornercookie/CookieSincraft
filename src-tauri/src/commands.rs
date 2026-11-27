@@ -10,7 +10,10 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, AtomicU32, Ordering}};
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc, Mutex,
+};
 use std::time::Instant;
 
 use base64::Engine;
@@ -86,11 +89,25 @@ pub struct UpscaleResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum UpscaleProgress {
-    Started { job_id: String },
-    Progress { stage: String, percent: u8, message: String },
-    Completed { job_id: String, result: UpscaleResultDto },
-    Cancelled { job_id: String },
-    Failed { job_id: String, error: String },
+    Started {
+        job_id: String,
+    },
+    Progress {
+        stage: String,
+        percent: u8,
+        message: String,
+    },
+    Completed {
+        job_id: String,
+        result: UpscaleResultDto,
+    },
+    Cancelled {
+        job_id: String,
+    },
+    Failed {
+        job_id: String,
+        error: String,
+    },
 }
 
 /// Single item in a batch upscale request.
@@ -123,13 +140,43 @@ pub struct BatchUpscaleResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event")]
 pub enum BatchProgress {
-    Started { batch_id: String, total: usize },
-    Progress { batch_id: String, done: usize, total: usize, current: String },
-    ItemCompleted { batch_id: String, done: usize, total: usize, current: String, output_path: String },
-    ItemFailed { batch_id: String, done: usize, total: usize, current: String, error: String },
-    Completed { batch_id: String, total: usize, successes: usize, failures: usize },
-    Cancelled { batch_id: String },
-    Failed { batch_id: String, error: String },
+    Started {
+        batch_id: String,
+        total: usize,
+    },
+    Progress {
+        batch_id: String,
+        done: usize,
+        total: usize,
+        current: String,
+    },
+    ItemCompleted {
+        batch_id: String,
+        done: usize,
+        total: usize,
+        current: String,
+        output_path: String,
+    },
+    ItemFailed {
+        batch_id: String,
+        done: usize,
+        total: usize,
+        current: String,
+        error: String,
+    },
+    Completed {
+        batch_id: String,
+        total: usize,
+        successes: usize,
+        failures: usize,
+    },
+    Cancelled {
+        batch_id: String,
+    },
+    Failed {
+        batch_id: String,
+        error: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -228,58 +275,58 @@ impl AppState {
         let mut dirs_to_check = Vec::new();
 
         if let Ok(entries) = std::fs::read_dir(&temp_root) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_dir() {
+                        if let Ok(modified) = metadata.modified() {
+                            if now.duration_since(modified).unwrap_or_default() > max_age {
+                                let _ = std::fs::remove_dir_all(entry.path());
+                            } else {
+                                dirs_to_check.push(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Enforce global quota across all active session dirs
+        for dir in &dirs_to_check {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        total_size += metadata.len();
+                    }
+                }
+            }
+        }
+
+        if total_size > MAX_TOTAL_QUOTA {
+            // Delete oldest directories first until under quota
+            let mut dirs_with_age: Vec<_> = dirs_to_check
+                .iter()
+                .filter_map(|d| {
+                    std::fs::metadata(d)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .map(|m| (d.clone(), m))
+                })
+                .collect();
+            dirs_with_age.sort_by_key(|(_, m)| *m);
+            for (dir, _) in dirs_with_age {
+                if total_size <= MAX_TOTAL_QUOTA {
+                    break;
+                }
+                if let Ok(entries) = std::fs::read_dir(&dir) {
                     for entry in entries.flatten() {
                         if let Ok(metadata) = entry.metadata() {
-                            if metadata.is_dir() {
-                                if let Ok(modified) = metadata.modified() {
-                                    if now.duration_since(modified).unwrap_or_default() > max_age {
-                                        let _ = std::fs::remove_dir_all(entry.path());
-                                    } else {
-                                        dirs_to_check.push(entry.path());
-                                    }
-                                }
-                            }
+                            total_size = total_size.saturating_sub(metadata.len());
                         }
                     }
                 }
-
-                // Enforce global quota across all active session dirs
-                for dir in &dirs_to_check {
-                    if let Ok(entries) = std::fs::read_dir(dir) {
-                        for entry in entries.flatten() {
-                            if let Ok(metadata) = entry.metadata() {
-                                total_size += metadata.len();
-                            }
-                        }
-                    }
-                }
-
-                if total_size > MAX_TOTAL_QUOTA {
-                    // Delete oldest directories first until under quota
-                    let mut dirs_with_age: Vec<_> = dirs_to_check
-                        .iter()
-                        .filter_map(|d| {
-                            std::fs::metadata(d)
-                                .ok()
-                                .and_then(|m| m.modified().ok())
-                                .map(|m| (d.clone(), m))
-                        })
-                        .collect();
-                    dirs_with_age.sort_by_key(|(_, m)| *m);
-                    for (dir, _) in dirs_with_age {
-                        if total_size <= MAX_TOTAL_QUOTA {
-                            break;
-                        }
-                        if let Ok(entries) = std::fs::read_dir(&dir) {
-                            for entry in entries.flatten() {
-                                if let Ok(metadata) = entry.metadata() {
-                                    total_size = total_size.saturating_sub(metadata.len());
-                                }
-                            }
-                        }
-                        let _ = std::fs::remove_dir_all(&dir);
-                    }
-                }
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
     }
 
     /// Authorize `path` for reading (file picker, drag-drop temp, recent file).
@@ -322,7 +369,6 @@ impl AppState {
     /// callers that need folder-based derivation checks should use
     /// `is_derived_output_allowed` instead.
     pub fn check_write(&self, path: &str) -> Result<(), String> {
-
         // Exact explicit save-file grant only.
         {
             let writes = self.allowed_writes.lock().unwrap();
@@ -352,7 +398,9 @@ impl AppState {
 
     pub fn job_gate(&self, job_id: &str) -> Result<Arc<PublicationGate>, String> {
         let jobs = self.running_jobs.lock().unwrap();
-        jobs.get(job_id).cloned().ok_or_else(|| "job not found".to_string())
+        jobs.get(job_id)
+            .cloned()
+            .ok_or_else(|| "job not found".to_string())
     }
 
     /// Request cancellation for `job_id`. Sets the shared `Arc<AtomicBool>`
@@ -464,9 +512,28 @@ fn is_windows_reserved_name(name: &str) -> bool {
     let base = upper.split('.').next().unwrap_or(&upper);
     matches!(
         base,
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     )
 }
 
@@ -694,10 +761,9 @@ pub fn load_image(
         state.allow_read(&path);
     }
     state.check_read(&path)?;
-    let image = Converter::load_image(PathBuf::from(&path).as_path())
-        .map_err(|e| e.to_string())?;
+    let image = Converter::load_image(PathBuf::from(&path).as_path()).map_err(|e| e.to_string())?;
     let (width, height) = image.dimensions();
-    
+
     // Validate input image dimensions against limits (R5)
     validate_dimensions(width, height)?;
 
@@ -715,21 +781,18 @@ pub fn load_image(
 /// This bypasses the allowlist but is rate-limited (20 requests/minute) and audited (SEC3).
 /// Note: Intentionally bypasses allowlist for overwrite confirmation flow, but has rate limiting.
 #[tauri::command]
-pub fn check_path_exists(
-    path: String,
-    state: State<'_, AppState>,
-) -> Result<bool, String> {
+pub fn check_path_exists(path: String, state: State<'_, AppState>) -> Result<bool, String> {
     // Rate limiting: 20 requests per minute (SEC3) - atomic check-and-increment with sliding window
     {
         let mut window_start = state.path_check_window_start.lock().unwrap();
         let now = Instant::now();
-        
+
         // Reset window if more than 60 seconds have passed
         if now.duration_since(*window_start) >= std::time::Duration::from_secs(60) {
             *window_start = now;
             state.path_check_count.store(0, Ordering::Relaxed);
         }
-        
+
         // Atomically increment and check
         let current = state.path_check_count.fetch_add(1, Ordering::AcqRel) + 1;
         if current > 20 {
@@ -772,11 +835,7 @@ pub fn load_image_from_base64(
 
     // Create isolated temp directory (cross-platform, SEC5, SEC8)
     let temp_root = std::env::temp_dir().join("cookiesincraft");
-    let session_dir = temp_root.join(format!(
-        "{}_{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
+    let session_dir = temp_root.join(format!("{}_{}", std::process::id(), fastrand::u64(..)));
     std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
 
     // Register session dir for cleanup on drop (SEC5)
@@ -790,7 +849,7 @@ pub fn load_image_from_base64(
     // Load image through the same bounded decode path as file loads.
     let image = Converter::load_image_from_bytes(&bytes).map_err(|e| e.to_string())?;
     let (width, height) = image.dimensions();
-    
+
     // Validate input image dimensions against limits (R5)
     validate_dimensions(width, height)?;
 
@@ -911,7 +970,10 @@ pub fn select_image(state: State<'_, AppState>) -> Result<Option<String>, String
     let selected = FileDialog::new()
         .add_filter(
             "Image",
-            &["png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "ico", "pnm", "pbm", "pgm", "ppm", "pam"],
+            &[
+                "png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "ico", "pnm", "pbm",
+                "pgm", "ppm", "pam",
+            ],
         )
         .pick_file();
     if let Some(ref path) = selected {
@@ -949,9 +1011,7 @@ pub fn select_save_path(
 /// The selected path is added to the write allowlist so it can be used as
 /// the output folder for settings persistence and batch upscale.
 #[tauri::command]
-pub fn select_output_folder(
-    state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
+pub fn select_output_folder(state: State<'_, AppState>) -> Result<Option<String>, String> {
     let selected = FileDialog::new().pick_folder();
     if let Some(ref path) = selected {
         let path_str = path.to_string_lossy().to_string();
@@ -964,13 +1024,14 @@ pub fn select_output_folder(
 /// Each selected path is added to the read allowlist so it can be used as
 /// input for upscale or batch_upscale.
 #[tauri::command]
-pub fn select_multiple_images(
-    state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
+pub fn select_multiple_images(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let selected: Vec<PathBuf> = FileDialog::new()
         .add_filter(
             "Image",
-            &["png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "ico", "pnm", "pbm", "pgm", "ppm", "pam"],
+            &[
+                "png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "ico", "pnm", "pbm",
+                "pgm", "ppm", "pam",
+            ],
         )
         .pick_files()
         .unwrap_or_default();
@@ -1037,14 +1098,7 @@ async fn execute_upscale(
     keep_aspect_ratio: bool,
 ) -> Result<UpscaleResultDto, ExecuteUpscaleError> {
     // Build domain job from DTO
-    let mut job = build_job(
-        &job_id,
-        &dto,
-        input_path,
-        output_path,
-        backend,
-        algorithm,
-    );
+    let mut job = build_job(&job_id, &dto, input_path, output_path, backend, algorithm);
 
     // Check path permissions
     state.check_read(&job.input_path.to_string_lossy())?;
@@ -1080,15 +1134,22 @@ async fn execute_upscale(
     }
 
     if let Some(channel) = on_event {
-        let _ = channel.send(UpscaleProgress::Started { job_id: job_id.clone() });
+        let _ = channel.send(UpscaleProgress::Started {
+            job_id: job_id.clone(),
+        });
     }
 
     let image = Converter::load_image(job.input_path.as_path()).map_err(|e| {
         let error = ExecuteUpscaleError::from_crate_error(e);
         if let Some(channel) = on_event {
             let _ = channel.send(match &error {
-                ExecuteUpscaleError::Failed(message) => UpscaleProgress::Failed { job_id: job_id.clone(), error: message.clone() },
-                ExecuteUpscaleError::Cancelled(_) => UpscaleProgress::Cancelled { job_id: job_id.clone() },
+                ExecuteUpscaleError::Failed(message) => UpscaleProgress::Failed {
+                    job_id: job_id.clone(),
+                    error: message.clone(),
+                },
+                ExecuteUpscaleError::Cancelled(_) => UpscaleProgress::Cancelled {
+                    job_id: job_id.clone(),
+                },
             });
         }
         error
@@ -1128,7 +1189,9 @@ async fn execute_upscale(
 
         // Check for cancellation before starting via the shared token.
         if cancel.load(Ordering::Relaxed) {
-            return Err(ExecuteUpscaleError::Cancelled("job cancelled before start".to_string()));
+            return Err(ExecuteUpscaleError::Cancelled(
+                "job cancelled before start".to_string(),
+            ));
         }
 
         // Build UpscaleControl sharing the job's cancel token and a real
@@ -1138,9 +1201,13 @@ async fn execute_upscale(
         let progress_percent = Arc::clone(&last_percent);
         let on_event_for_cb = on_event_clone.clone();
         let progress_cb = Arc::new(move |completed: usize, total: usize| {
-            if total == 0 { return; }
+            if total == 0 {
+                return;
+            }
             let pct = ((10 + completed.min(total).saturating_mul(70) / total) / 10 * 10) as u8;
-            if progress_percent.fetch_max(pct, Ordering::Relaxed) >= pct { return; }
+            if progress_percent.fetch_max(pct, Ordering::Relaxed) >= pct {
+                return;
+            }
             if let Some(channel) = &on_event_for_cb {
                 let _ = channel.send(UpscaleProgress::Progress {
                     stage: "upscaling".to_string(),
@@ -1181,11 +1248,16 @@ async fn execute_upscale(
                         let _ = channel.send(UpscaleProgress::Progress {
                             stage: "fallback".to_string(),
                             percent: last_percent.load(Ordering::Relaxed),
-                            message: format!("GPU failed, falling back to CPU: {}", fallback_reason),
+                            message: format!(
+                                "GPU failed, falling back to CPU: {}",
+                                fallback_reason
+                            ),
                         });
                     }
                     if control.is_cancelled() {
-                        return Err(ExecuteUpscaleError::Cancelled("job cancelled during upscale".to_string()));
+                        return Err(ExecuteUpscaleError::Cancelled(
+                            "job cancelled during upscale".to_string(),
+                        ));
                     }
                     let mut cpu_job = job_clone.clone();
                     cpu_job.algorithm = Algorithm::Lanczos3;
@@ -1196,7 +1268,9 @@ async fn execute_upscale(
                             crate::upscaler::UpscaleError::Cancelled(msg) => {
                                 ExecuteUpscaleError::Cancelled(msg)
                             }
-                            other => ExecuteUpscaleError::Failed(format!("CPU fallback after GPU failure: {other}")),
+                            other => ExecuteUpscaleError::Failed(format!(
+                                "CPU fallback after GPU failure: {other}"
+                            )),
                         })?;
                     (img, true, Some(fallback_reason))
                 }
@@ -1206,7 +1280,9 @@ async fn execute_upscale(
                 let img = cpu
                     .upscale_with_control(&job_clone, &image, control.clone())
                     .map_err(|e| match e {
-                        crate::upscaler::UpscaleError::Cancelled(msg) => ExecuteUpscaleError::Cancelled(msg),
+                        crate::upscaler::UpscaleError::Cancelled(msg) => {
+                            ExecuteUpscaleError::Cancelled(msg)
+                        }
                         other => ExecuteUpscaleError::Failed(other.to_string()),
                     })?;
                 (img, false, None)
@@ -1215,7 +1291,9 @@ async fn execute_upscale(
 
         // Check for cancellation after upscale via the shared token.
         if cancel.load(Ordering::Relaxed) {
-            return Err(ExecuteUpscaleError::Cancelled("job cancelled during upscale".to_string()));
+            return Err(ExecuteUpscaleError::Cancelled(
+                "job cancelled during upscale".to_string(),
+            ));
         }
 
         if let Some(channel) = &on_event_clone {
@@ -1254,29 +1332,36 @@ async fn execute_upscale(
             fallback_reason,
             preview: Some(preview),
         })
-    }).await;
+    })
+    .await;
 
     // Handle join error
     let result = match result {
         Ok(r) => r,
-        Err(e) => Err(ExecuteUpscaleError::Failed(format!("upscale task panicked: {e}"))),
+        Err(e) => Err(ExecuteUpscaleError::Failed(format!(
+            "upscale task panicked: {e}"
+        ))),
     };
 
     match &result {
         Ok(dto) => {
             if let Some(channel) = on_event {
-                let _ = channel.send(UpscaleProgress::Completed { job_id: job_id.clone(), result: dto.clone() });
+                let _ = channel.send(UpscaleProgress::Completed {
+                    job_id: job_id.clone(),
+                    result: dto.clone(),
+                });
             }
         }
         Err(e) => {
             if let Some(channel) = on_event {
                 let _ = channel.send(match e {
-                    ExecuteUpscaleError::Cancelled(_) => {
-                        UpscaleProgress::Cancelled { job_id: job_id.clone() }
-                    }
-                    ExecuteUpscaleError::Failed(error) => {
-                        UpscaleProgress::Failed { job_id: job_id.clone(), error: error.clone() }
-                    }
+                    ExecuteUpscaleError::Cancelled(_) => UpscaleProgress::Cancelled {
+                        job_id: job_id.clone(),
+                    },
+                    ExecuteUpscaleError::Failed(error) => UpscaleProgress::Failed {
+                        job_id: job_id.clone(),
+                        error: error.clone(),
+                    },
                 });
             }
         }
@@ -1307,8 +1392,13 @@ pub async fn upscale(
     let job_id = next_job_id();
     let overwrite = job.overwrite;
     // Register the job and obtain its shared cancel token before starting.
-    let gate = state.start_job(&job_id).ok_or("another upscale job is running".to_string())?;
-    let _job_guard = JobGuard { state: &state, job_id: job_id.clone() };
+    let gate = state
+        .start_job(&job_id)
+        .ok_or("another upscale job is running".to_string())?;
+    let _job_guard = JobGuard {
+        state: &state,
+        job_id: job_id.clone(),
+    };
 
     execute_upscale(
         job_id,
@@ -1330,12 +1420,11 @@ pub async fn upscale(
 
 /// Cancel an in-flight upscale job.
 #[tauri::command]
-pub async fn cancel_job(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn cancel_job(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let gate = state.job_gate(&id)?;
-    tokio::task::spawn_blocking(move || gate.request_cancel()).await.map_err(|err| err.to_string())?
+    tokio::task::spawn_blocking(move || gate.request_cancel())
+        .await
+        .map_err(|err| err.to_string())?
 }
 
 /// Generate a default output path next to the input file with `_upscaled` suffix.
@@ -1372,9 +1461,14 @@ pub async fn batch_upscale(
 
     // Register the batch as one parent job and reuse its cancel token for
     // every child item — no independent child registry IDs.
-    let gate = state.start_job(&batch_id).ok_or("another job is running".to_string())?;
+    let gate = state
+        .start_job(&batch_id)
+        .ok_or("another job is running".to_string())?;
     let cancel = gate.cancel_token();
-    let _job_guard = JobGuard { state: &state, job_id: batch_id.clone() };
+    let _job_guard = JobGuard {
+        state: &state,
+        job_id: batch_id.clone(),
+    };
 
     let _ = on_event.send(BatchProgress::Started {
         batch_id: batch_id.clone(),
@@ -1484,21 +1578,21 @@ pub async fn batch_upscale(
                 });
             }
             Err(crate::commands::ExecuteUpscaleError::Cancelled(_)) => {
-                    let _ = on_event.send(BatchProgress::Cancelled {
-                        batch_id: batch_id.clone(),
-                    });
-                    return Ok(BatchUpscaleResultDto { batch_id, total });
-                }
-                Err(crate::commands::ExecuteUpscaleError::Failed(error)) => {
-                    failures += 1;
-                    let _ = on_event.send(BatchProgress::ItemFailed {
-                        batch_id: batch_id.clone(),
-                        done,
-                        total,
-                        current: current.clone(),
-                        error,
-                    });
-                }
+                let _ = on_event.send(BatchProgress::Cancelled {
+                    batch_id: batch_id.clone(),
+                });
+                return Ok(BatchUpscaleResultDto { batch_id, total });
+            }
+            Err(crate::commands::ExecuteUpscaleError::Failed(error)) => {
+                failures += 1;
+                let _ = on_event.send(BatchProgress::ItemFailed {
+                    batch_id: batch_id.clone(),
+                    done,
+                    total,
+                    current: current.clone(),
+                    error,
+                });
+            }
         }
     }
 
@@ -1532,12 +1626,14 @@ pub fn export_image(
     state.check_read(&path)?;
     state.check_write(&output_path)?;
     // Same-file safeguard: never export a file onto itself (incl. aliases/hardlinks).
-    if same_file(PathBuf::from(&path).as_path(), PathBuf::from(&output_path).as_path()) {
+    if same_file(
+        PathBuf::from(&path).as_path(),
+        PathBuf::from(&output_path).as_path(),
+    ) {
         return Err("output path is the same file as the input".to_string());
     }
     let format = parse_image_format(&format)?;
-    let image = Converter::load_image(PathBuf::from(&path).as_path())
-        .map_err(|e| e.to_string())?;
+    let image = Converter::load_image(PathBuf::from(&path).as_path()).map_err(|e| e.to_string())?;
     Converter::save_image(
         &image,
         PathBuf::from(&output_path).as_path(),
@@ -1561,12 +1657,15 @@ pub fn convert_image(
     state.check_read(&input_path)?;
     state.check_write(&output_path)?;
     // Same-file safeguard: never convert a file onto itself (incl. aliases/hardlinks).
-    if same_file(PathBuf::from(&input_path).as_path(), PathBuf::from(&output_path).as_path()) {
+    if same_file(
+        PathBuf::from(&input_path).as_path(),
+        PathBuf::from(&output_path).as_path(),
+    ) {
         return Err("output path is the same file as the input".to_string());
     }
     let format = parse_image_format(&format)?;
-    let image = Converter::load_image(PathBuf::from(&input_path).as_path())
-        .map_err(|e| e.to_string())?;
+    let image =
+        Converter::load_image(PathBuf::from(&input_path).as_path()).map_err(|e| e.to_string())?;
     Converter::save_image(
         &image,
         PathBuf::from(&output_path).as_path(),
@@ -1777,7 +1876,8 @@ mod tests {
 
         // Create a real hard link (std::fs::hard_link works on Windows too).
         // Must succeed; no silent success if creation fails.
-        std::fs::hard_link(&original, &link).expect("hard link creation must succeed in test environment");
+        std::fs::hard_link(&original, &link)
+            .expect("hard link creation must succeed in test environment");
 
         assert!(
             same_file(&original, &link),

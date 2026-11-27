@@ -12,18 +12,18 @@ use std::path::PathBuf;
 use image::GenericImageView;
 
 // Pull domain modules into this test crate so their `crate::` paths resolve.
-#[path = "../src/upscaler.rs"]
-mod upscaler;
+#[path = "../src/commands.rs"]
+mod commands;
+#[path = "../src/converter.rs"]
+mod converter;
 #[path = "../src/cpu.rs"]
 mod cpu;
 #[path = "../src/gpu.rs"]
 mod gpu;
-#[path = "../src/converter.rs"]
-mod converter;
-#[path = "../src/commands.rs"]
-mod commands;
 #[path = "../src/settings.rs"]
 mod settings;
+#[path = "../src/upscaler.rs"]
+mod upscaler;
 
 use crate::commands::validate_dimensions;
 use crate::converter::{Converter, ImageFormat};
@@ -39,11 +39,7 @@ fn ensure_test_dir() -> PathBuf {
     // Fresh unique subdir per run so leftover outputs from previous runs
     // never trip the no-clobber guard, and we never delete the test source
     // files that live in `src-tauri/tests/`.
-    let dir = test_dir().join(format!(
-        "run_{}_{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
+    let dir = test_dir().join(format!("run_{}_{}", std::process::id(), fastrand::u64(..)));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }
@@ -53,7 +49,12 @@ fn ensure_test_dir() -> PathBuf {
 /// retained tests do not exercise `fast_image_resize` SIMD paths.
 fn make_test_png(path: &std::path::Path, width: u32, height: u32) -> image::DynamicImage {
     let img = image::ImageBuffer::from_fn(width, height, |x, y| {
-        image::Rgba([(x.wrapping_mul(2)) as u8, (y.wrapping_mul(2)) as u8, 128, 255])
+        image::Rgba([
+            (x.wrapping_mul(2)) as u8,
+            (y.wrapping_mul(2)) as u8,
+            128,
+            255,
+        ])
     });
     let dynamic = image::DynamicImage::ImageRgba8(img);
     dynamic.save(path).expect("failed to write test PNG");
@@ -132,13 +133,25 @@ fn jpeg_quality_validation_rejects_out_of_range() {
 
     // Quality 50 and 100 must be accepted.
     assert!(
-        Converter::save_image(&image, &dir.join("ok_50.jpg"), ImageFormat::Jpeg, Some(50), false)
-            .is_ok(),
+        Converter::save_image(
+            &image,
+            &dir.join("ok_50.jpg"),
+            ImageFormat::Jpeg,
+            Some(50),
+            false
+        )
+        .is_ok(),
         "JPEG quality 50 should be accepted"
     );
     assert!(
-        Converter::save_image(&image, &dir.join("ok_100.jpg"), ImageFormat::Jpeg, Some(100), false)
-            .is_ok(),
+        Converter::save_image(
+            &image,
+            &dir.join("ok_100.jpg"),
+            ImageFormat::Jpeg,
+            Some(100),
+            false
+        )
+        .is_ok(),
         "JPEG quality 100 should be accepted"
     );
 }
@@ -164,15 +177,24 @@ fn backend_algorithm_enums_and_trait_methods() {
 #[test]
 fn validate_dimensions_boundary_values() {
     // 4096x4096 = exactly 64 MB buffer (16,777,216 pixels * 4 bytes)
-    assert!(validate_dimensions(4096, 4096).is_ok(), "4096x4096 should be allowed");
+    assert!(
+        validate_dimensions(4096, 4096).is_ok(),
+        "4096x4096 should be allowed"
+    );
 
     // 4097x4097 exceeds dimension limit
     let err = validate_dimensions(4097, 4097).expect_err("4097x4097 should be rejected");
-    assert!(err.contains("4096"), "error should mention max dimension 4096");
+    assert!(
+        err.contains("4096"),
+        "error should mention max dimension 4096"
+    );
 
     // 8192x8192 exceeds dimension limit (checked before buffer limit)
     let err = validate_dimensions(8192, 8192).expect_err("8192x8192 should be rejected");
-    assert!(err.contains("4096"), "error should mention max dimension 4096");
+    assert!(
+        err.contains("4096"),
+        "error should mention max dimension 4096"
+    );
 
     // Test buffer limit with dimensions under 4096 but over 64 MB
     // 4096x4096 = 64 MB exactly, so we need dimensions slightly over that
@@ -193,7 +215,11 @@ fn validate_dimensions_zero_rejected() {
 fn validate_dimensions_checked_mul_overflow() {
     // u32::MAX exceeds dimension limit (4096), so dimension check triggers first
     let err = validate_dimensions(u32::MAX, u32::MAX).expect_err("overflow should be rejected");
-    assert!(err.contains("4096"), "error should mention max dimension 4096: {}", err);
+    assert!(
+        err.contains("4096"),
+        "error should mention max dimension 4096: {}",
+        err
+    );
 }
 
 /// GPU shader module / pipeline validation.
@@ -296,15 +322,19 @@ fn nis_coefficients_are_64x8_and_indexed() {
 fn anime4k_cnn_has_9_passes_and_weight() {
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("shaders/anime4k_cnn_passes");
     let passes = [
-        "conv2d_tf", "conv2d_1_tf", "conv2d_2_tf", "conv2d_3_tf", "conv2d_4_tf",
-        "conv2d_5_tf", "conv2d_6_tf", "conv2d_last_tf", "MAIN",
+        "conv2d_tf",
+        "conv2d_1_tf",
+        "conv2d_2_tf",
+        "conv2d_3_tf",
+        "conv2d_4_tf",
+        "conv2d_5_tf",
+        "conv2d_6_tf",
+        "conv2d_last_tf",
+        "MAIN",
     ];
     for name in &passes {
         let path = base.join(format!("{name}.wgsl"));
-        assert!(
-            path.exists(),
-            "Anime4K pass shader missing: {path:?}"
-        );
+        assert!(path.exists(), "Anime4K pass shader missing: {path:?}");
     }
     // The GLSL mat4 at Anime4K_Upscale_CNN_x2_M.glsl:230 contains 0.16265294;
     // it must be mechanically copied into conv2d_6_tf.wgsl.
@@ -346,7 +376,12 @@ fn every_included_wgsl_parses_with_naga() {
     }
 }
 
-fn job_for(name: &str, algorithm: Algorithm, src: &std::path::Path, out: &std::path::Path) -> UpscaleJob {
+fn job_for(
+    name: &str,
+    algorithm: Algorithm,
+    src: &std::path::Path,
+    out: &std::path::Path,
+) -> UpscaleJob {
     UpscaleJob {
         id: name.to_string(),
         input_path: src.to_path_buf(),
@@ -398,8 +433,8 @@ fn gpu_dispatch_writes_target_size_png() {
         assert_eq!((w, h), (128, 96), "{name} in-memory size");
         Converter::save_image(&image, &out, ImageFormat::Png, None, false)
             .unwrap_or_else(|e| panic!("{name} save failed: {e}"));
-        let reloaded = Converter::load_image(&out)
-            .unwrap_or_else(|e| panic!("{name} reload failed: {e}"));
+        let reloaded =
+            Converter::load_image(&out).unwrap_or_else(|e| panic!("{name} reload failed: {e}"));
         assert_eq!(reloaded.dimensions(), (128, 96), "{name} reloaded size");
         let rgba = reloaded.to_rgba8();
         let first = rgba.get_pixel(0, 0).0;
@@ -455,7 +490,9 @@ fn gpu_or_skip(test_name: &str) -> Option<GpuUpscaler> {
 /// equals the corresponding source pixel's alpha (cpos = pos / 2).
 #[test]
 fn gpu_anime4k_alpha_preserved_from_original() {
-    let Some(gpu) = gpu_or_skip("gpu_anime4k_alpha_preserved_from_original") else { return };
+    let Some(gpu) = gpu_or_skip("gpu_anime4k_alpha_preserved_from_original") else {
+        return;
+    };
 
     let dir = ensure_test_dir();
     let src_path = dir.join("anime4k_alpha_src.png");
@@ -466,7 +503,13 @@ fn gpu_anime4k_alpha_preserved_from_original() {
     let dynamic = image::DynamicImage::ImageRgba8(source.clone());
     dynamic.save(&src_path).expect("save test PNG");
 
-    let job = anime4k_job_2x("anime4k_alpha", &src_path, &dir.join("anime4k_alpha_out.png"), 2, 2);
+    let job = anime4k_job_2x(
+        "anime4k_alpha",
+        &src_path,
+        &dir.join("anime4k_alpha_out.png"),
+        2,
+        2,
+    );
     let result = gpu
         .upscale(&job, &dynamic)
         .unwrap_or_else(|e| panic!("Anime4K alpha upscale failed: {e}"));
@@ -474,10 +517,15 @@ fn gpu_anime4k_alpha_preserved_from_original() {
     assert_eq!((w, h), (4, 4), "Anime4K 2x output must be 4x4");
 
     let rgba = result.to_rgba8();
-    let expected = [[0u8,20,60,80],[10,30,70,90],[30,50,90,110],[40,60,100,120]];
-    for (y,row) in expected.iter().enumerate() {
-        for (x,alpha) in row.iter().enumerate() {
-            assert!(rgba.get_pixel(x as u32,y as u32).0[3].abs_diff(*alpha) <= 1);
+    let expected = [
+        [0u8, 20, 60, 80],
+        [10, 30, 70, 90],
+        [30, 50, 90, 110],
+        [40, 60, 100, 120],
+    ];
+    for (y, row) in expected.iter().enumerate() {
+        for (x, alpha) in row.iter().enumerate() {
+            assert!(rgba.get_pixel(x as u32, y as u32).0[3].abs_diff(*alpha) <= 1);
         }
     }
 }
@@ -549,157 +597,187 @@ fn gpu_anime4k_depth_to_space_subpixel_parity() {
 /// target on both axes), so this exercises the GPU Bilinear whole-frame resample
 /// from the original source to the exact non-integer target. At 1.5x run complete
 /// 2x CNN then GPU Bilinear.
-    #[test]
-    fn gpu_anime4k_96x64_to_144x96_no_crop() {
-        let Some(gpu) = gpu_or_skip("gpu_anime4k_96x64_to_144x96_no_crop") else { return };
+#[test]
+fn gpu_anime4k_96x64_to_144x96_no_crop() {
+    let Some(gpu) = gpu_or_skip("gpu_anime4k_96x64_to_144x96_no_crop") else {
+        return;
+    };
 
-        let dir = ensure_test_dir();
-        // 96x64 source with distinct alpha top (50) / bottom (250) and non-constant RGB fixture.
-        let src_path = dir.join("anime4k_96x64_src.png");
-        let source = image::ImageBuffer::from_fn(96, 64, |x, y| {
-            let alpha = if y < 32 { 50u8 } else { 250u8 };
-            image::Rgba([x as u8, y as u8, (x + y) as u8, alpha])
-        });
-        source.save(&src_path).expect("save test PNG");
+    let dir = ensure_test_dir();
+    // 96x64 source with distinct alpha top (50) / bottom (250) and non-constant RGB fixture.
+    let src_path = dir.join("anime4k_96x64_src.png");
+    let source = image::ImageBuffer::from_fn(96, 64, |x, y| {
+        let alpha = if y < 32 { 50u8 } else { 250u8 };
+        image::Rgba([x as u8, y as u8, (x + y) as u8, alpha])
+    });
+    source.save(&src_path).expect("save test PNG");
 
-        // Non-integer 1.5x ratio: target 144x96 (not 2x).
-        let job = UpscaleJob {
-            id: "anime4k_96x64".to_string(),
-            input_path: src_path.clone(),
-            output_path: dir.join("anime4k_96x64_out.png"),
-            backend: Backend::Gpu,
-            algorithm: Algorithm::Anime4k,
-            target_width: 144,
-            target_height: 96,
-            jpeg_quality: None,
-            status: JobStatus::Running,
-        };
-        let result = gpu
-            .upscale(&job, &image::DynamicImage::ImageRgba8(source.clone()))
-            .unwrap_or_else(|e| panic!("Anime4K 96x64=>144x96 upscale failed: {e}"));
-        let (w, h) = result.dimensions();
-        assert_eq!((w, h), (144, 96), "Anime4K 96x64=>144x96 output must be 144x96");
+    // Non-integer 1.5x ratio: target 144x96 (not 2x).
+    let job = UpscaleJob {
+        id: "anime4k_96x64".to_string(),
+        input_path: src_path.clone(),
+        output_path: dir.join("anime4k_96x64_out.png"),
+        backend: Backend::Gpu,
+        algorithm: Algorithm::Anime4k,
+        target_width: 144,
+        target_height: 96,
+        jpeg_quality: None,
+        status: JobStatus::Running,
+    };
+    let result = gpu
+        .upscale(&job, &image::DynamicImage::ImageRgba8(source.clone()))
+        .unwrap_or_else(|e| panic!("Anime4K 96x64=>144x96 upscale failed: {e}"));
+    let (w, h) = result.dimensions();
+    assert_eq!(
+        (w, h),
+        (144, 96),
+        "Anime4K 96x64=>144x96 output must be 144x96"
+    );
 
-        // Save and reload actual PNG result via image API.
-        result.save(&dir.join("anime4k_96x64_out.png")).expect("save result PNG");
-        let reloaded = image::open(&dir.join("anime4k_96x64_out.png"))
-            .expect("reload result PNG")
-            .to_rgba8();
+    // Save and reload actual PNG result via image API.
+    result
+        .save(&dir.join("anime4k_96x64_out.png"))
+        .expect("save result PNG");
+    let reloaded = image::open(&dir.join("anime4k_96x64_out.png"))
+        .expect("reload result PNG")
+        .to_rgba8();
 
-        let rgba = reloaded;
-        // Top-left (0,0) should have alpha=50 (top-half source, bilinear at pixel centre).
-        assert_eq!(
-            rgba.get_pixel(0, 0).0[3], 50,
-            "alpha at (0,0) should be 50 (top-half source), got {}",
-            rgba.get_pixel(0, 0).0[3]
-        );
-        // Top-right (143,0) should have alpha=50 (top half, no crop on right edge).
-        assert_eq!(
-            rgba.get_pixel(143, 0).0[3], 50,
-            "alpha at (143,0) should be 50 (top half, no right-edge crop), got {}",
-            rgba.get_pixel(143, 0).0[3]
-        );
-        // Bottom-left (0,95) should have alpha=250 (bottom half source).
-        assert_eq!(
-            rgba.get_pixel(0, 95).0[3], 250,
-            "alpha at (0,95) should be 250 (bottom half source), got {}",
-            rgba.get_pixel(0, 95).0[3]
-        );
-        // Bottom-right (143,95) should have alpha=250 (bottom half, no crop on right edge).
-        assert_eq!(
-            rgba.get_pixel(143, 95).0[3], 250,
-            "alpha at (143,95) should be 250 (bottom half, no right-edge crop), got {}",
-            rgba.get_pixel(143, 95).0[3]
-        );
-        // Center pixel (71,47) maps to source row ~31.3 (top half). Alpha is
-        // 50 with nearest sampling or interpolated between 50-250 with bilinear
-        // — either way it comes from the top half source, proving the full frame
-        // is processed and the right/bottom edges are not cropped.
-        let center_alpha = rgba.get_pixel(71, 47).0[3];
-        assert!(
-            center_alpha >= 50 && center_alpha <= 250,
-            "center alpha {} should be between 50 and 250, proving no crop",
-            center_alpha
-        );
-        // Output must not be flat: top row alpha 50, bottom row alpha 250.
-        let first = rgba.get_pixel(0, 0).0;
-        let varies = rgba.pixels().any(|p| p.0 != first);
-        assert!(varies, "Anime4K output is a flat color");
-        // The Anime4K-upscaled RGB must differ from direct bilinear original.
-        let dir_bilinear_path = dir.join("anime4k_96x64_direct_bilinear.png");
-        let direct_src = image::ImageBuffer::from_fn(96, 64, |x, y| {
-            image::Rgba([x as u8, y as u8, (x + y) as u8, if y < 32 { 50u8 } else { 250u8 }])
-        });
-        direct_src.save(&dir_bilinear_path).expect("save direct bilinear PNG");
-        let direct_result = gpu
-            .upscale(
-                &UpscaleJob {
-                    id: "direct_bilinear".to_string(),
-                    input_path: dir.join("anime4k_96x64_src.png"),
-                    output_path: dir_bilinear_path,
-                    backend: Backend::Gpu,
-                    algorithm: Algorithm::Bilinear,
-                    target_width: 144,
-                    target_height: 96,
-                    jpeg_quality: None,
-                    status: JobStatus::Running,
-                },
-                &image::DynamicImage::ImageRgba8(source.clone()),
-            )
-            .unwrap_or_else(|e| panic!("Direct bilinear upscale failed: {e}"));
-        let direct_rgba = direct_result.to_rgba8();
-        // Verify the Anime4K result differs in RGB from direct bilinear over full image.
-        assert!(
-            rgba.pixels().zip(direct_rgba.pixels()).any(|(a, b)| a.0[..3] != b.0[..3]),
-            "Anime4K result RGB must differ from direct bilinear original somewhere in the full image"
-        );
-        // Assert Anime4K result equals 2x Anime then GPU Bilinear to 144x96.
-        // 2x Anime4K target (192x128) then bilinear down to 144x96 reproduces
-        // the same non-integer upsample path, and their RGB must match.
-        let job_2x = UpscaleJob {
-            id: "anime4k_2x".to_string(),
-            input_path: src_path.clone(),
-            output_path: dir.join("anime4k_2x_out.png"),
-            backend: Backend::Gpu,
-            algorithm: Algorithm::Anime4k,
-            target_width: 192,
-            target_height: 128,
-            jpeg_quality: None,
-            status: JobStatus::Running,
-        };
-        let result_2x = gpu
-            .upscale(&job_2x, &image::DynamicImage::ImageRgba8(source.clone()))
-            .unwrap_or_else(|e| panic!("Anime4K 2x upscale failed: {e}"));
-        result_2x.save(&dir.join("anime4k_2x_out.png")).expect("save 2x Anime4K PNG");
-        let reloaded_2x = image::open(&dir.join("anime4k_2x_out.png"))
-            .expect("reload 2x Anime4K PNG")
-            .to_rgba8();
-        // Bilinear from 192x128 to 144x96.
-        let job_bilinear = UpscaleJob {
-            id: "bilinear_192to144".to_string(),
-            input_path: dir.join("anime4k_2x_out.png"),
-            output_path: dir.join("anime4k_2x_bilinear_144x96.png"),
-            backend: Backend::Gpu,
-            algorithm: Algorithm::Bilinear,
-            target_width: 144,
-            target_height: 96,
-            jpeg_quality: None,
-            status: JobStatus::Running,
-        };
-        let result_bilinear = gpu
-            .upscale(&job_bilinear, &image::DynamicImage::ImageRgba8(reloaded_2x.clone()))
-            .unwrap_or_else(|e| panic!("Bilinear 192x128=>144x96 failed: {e}"));
-        let bilinear_rgba = result_bilinear.to_rgba8();
-        // Assert Anime4K result equals 2x Anime then GPU Bilinear (full-frame chained result).
-        assert_eq!(rgba.as_raw(), bilinear_rgba.as_raw(), "full-frame chained result");
-    }
+    let rgba = reloaded;
+    // Top-left (0,0) should have alpha=50 (top-half source, bilinear at pixel centre).
+    assert_eq!(
+        rgba.get_pixel(0, 0).0[3],
+        50,
+        "alpha at (0,0) should be 50 (top-half source), got {}",
+        rgba.get_pixel(0, 0).0[3]
+    );
+    // Top-right (143,0) should have alpha=50 (top half, no crop on right edge).
+    assert_eq!(
+        rgba.get_pixel(143, 0).0[3],
+        50,
+        "alpha at (143,0) should be 50 (top half, no right-edge crop), got {}",
+        rgba.get_pixel(143, 0).0[3]
+    );
+    // Bottom-left (0,95) should have alpha=250 (bottom half source).
+    assert_eq!(
+        rgba.get_pixel(0, 95).0[3],
+        250,
+        "alpha at (0,95) should be 250 (bottom half source), got {}",
+        rgba.get_pixel(0, 95).0[3]
+    );
+    // Bottom-right (143,95) should have alpha=250 (bottom half, no crop on right edge).
+    assert_eq!(
+        rgba.get_pixel(143, 95).0[3],
+        250,
+        "alpha at (143,95) should be 250 (bottom half, no right-edge crop), got {}",
+        rgba.get_pixel(143, 95).0[3]
+    );
+    // Center pixel (71,47) maps to source row ~31.3 (top half). Alpha is
+    // 50 with nearest sampling or interpolated between 50-250 with bilinear
+    // — either way it comes from the top half source, proving the full frame
+    // is processed and the right/bottom edges are not cropped.
+    let center_alpha = rgba.get_pixel(71, 47).0[3];
+    assert!(
+        center_alpha >= 50 && center_alpha <= 250,
+        "center alpha {} should be between 50 and 250, proving no crop",
+        center_alpha
+    );
+    // Output must not be flat: top row alpha 50, bottom row alpha 250.
+    let first = rgba.get_pixel(0, 0).0;
+    let varies = rgba.pixels().any(|p| p.0 != first);
+    assert!(varies, "Anime4K output is a flat color");
+    // The Anime4K-upscaled RGB must differ from direct bilinear original.
+    let dir_bilinear_path = dir.join("anime4k_96x64_direct_bilinear.png");
+    let direct_src = image::ImageBuffer::from_fn(96, 64, |x, y| {
+        image::Rgba([
+            x as u8,
+            y as u8,
+            (x + y) as u8,
+            if y < 32 { 50u8 } else { 250u8 },
+        ])
+    });
+    direct_src
+        .save(&dir_bilinear_path)
+        .expect("save direct bilinear PNG");
+    let direct_result = gpu
+        .upscale(
+            &UpscaleJob {
+                id: "direct_bilinear".to_string(),
+                input_path: dir.join("anime4k_96x64_src.png"),
+                output_path: dir_bilinear_path,
+                backend: Backend::Gpu,
+                algorithm: Algorithm::Bilinear,
+                target_width: 144,
+                target_height: 96,
+                jpeg_quality: None,
+                status: JobStatus::Running,
+            },
+            &image::DynamicImage::ImageRgba8(source.clone()),
+        )
+        .unwrap_or_else(|e| panic!("Direct bilinear upscale failed: {e}"));
+    let direct_rgba = direct_result.to_rgba8();
+    // Verify the Anime4K result differs in RGB from direct bilinear over full image.
+    assert!(
+        rgba.pixels()
+            .zip(direct_rgba.pixels())
+            .any(|(a, b)| a.0[..3] != b.0[..3]),
+        "Anime4K result RGB must differ from direct bilinear original somewhere in the full image"
+    );
+    // Assert Anime4K result equals 2x Anime then GPU Bilinear to 144x96.
+    // 2x Anime4K target (192x128) then bilinear down to 144x96 reproduces
+    // the same non-integer upsample path, and their RGB must match.
+    let job_2x = UpscaleJob {
+        id: "anime4k_2x".to_string(),
+        input_path: src_path.clone(),
+        output_path: dir.join("anime4k_2x_out.png"),
+        backend: Backend::Gpu,
+        algorithm: Algorithm::Anime4k,
+        target_width: 192,
+        target_height: 128,
+        jpeg_quality: None,
+        status: JobStatus::Running,
+    };
+    let result_2x = gpu
+        .upscale(&job_2x, &image::DynamicImage::ImageRgba8(source.clone()))
+        .unwrap_or_else(|e| panic!("Anime4K 2x upscale failed: {e}"));
+    result_2x
+        .save(&dir.join("anime4k_2x_out.png"))
+        .expect("save 2x Anime4K PNG");
+    let reloaded_2x = image::open(&dir.join("anime4k_2x_out.png"))
+        .expect("reload 2x Anime4K PNG")
+        .to_rgba8();
+    // Bilinear from 192x128 to 144x96.
+    let job_bilinear = UpscaleJob {
+        id: "bilinear_192to144".to_string(),
+        input_path: dir.join("anime4k_2x_out.png"),
+        output_path: dir.join("anime4k_2x_bilinear_144x96.png"),
+        backend: Backend::Gpu,
+        algorithm: Algorithm::Bilinear,
+        target_width: 144,
+        target_height: 96,
+        jpeg_quality: None,
+        status: JobStatus::Running,
+    };
+    let result_bilinear = gpu
+        .upscale(
+            &job_bilinear,
+            &image::DynamicImage::ImageRgba8(reloaded_2x.clone()),
+        )
+        .unwrap_or_else(|e| panic!("Bilinear 192x128=>144x96 failed: {e}"));
+    let bilinear_rgba = result_bilinear.to_rgba8();
+    // Assert Anime4K result equals 2x Anime then GPU Bilinear (full-frame chained result).
+    assert_eq!(
+        rgba.as_raw(),
+        bilinear_rgba.as_raw(),
+        "full-frame chained result"
+    );
+}
 
-    /// Regression: GPU validation failure must not be hidden by CPU fallback.
-    /// The `upscale` method returns Err on GPU error scope failure; callers
-    /// (commands.rs) handle fallback. This test verifies the GPU path reports
-    /// the error rather than silently producing CPU output.
-    #[test]
-    fn gpu_anime4k_validation_error_not_hidden_by_fallback() {
+/// Regression: GPU validation failure must not be hidden by CPU fallback.
+/// The `upscale` method returns Err on GPU error scope failure; callers
+/// (commands.rs) handle fallback. This test verifies the GPU path reports
+/// the error rather than silently producing CPU output.
+#[test]
+fn gpu_anime4k_validation_error_not_hidden_by_fallback() {
     // This test verifies the error-propagation contract: GpuUpscaler::upscale
     // returns Err on GPU error-scope failure (checked after every pass), and
     // does not fall back internally. The fallback decision lives in commands.rs.

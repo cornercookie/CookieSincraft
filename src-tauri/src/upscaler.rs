@@ -207,11 +207,8 @@ impl std::error::Error for UpscaleError {}
 /// they support a given backend and whether a fallback is available.
 pub trait Upscaler: Send + Sync {
     /// Upscale `image` according to `job`, returning the upscaled image.
-    fn upscale(
-        &self,
-        job: &UpscaleJob,
-        image: &DynamicImage,
-    ) -> Result<DynamicImage, UpscaleError>;
+    fn upscale(&self, job: &UpscaleJob, image: &DynamicImage)
+        -> Result<DynamicImage, UpscaleError>;
 
     /// Whether this upscaler supports the given backend.
     fn supports_backend(&self, backend: Backend) -> bool;

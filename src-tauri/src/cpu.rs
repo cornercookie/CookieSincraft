@@ -69,12 +69,7 @@ impl Upscaler for CpuUpscaler {
         let src_rgba = image.to_rgba8();
 
         if job.algorithm == Algorithm::Nearest {
-            return nearest_with_control(
-                &src_rgba,
-                job.target_width,
-                job.target_height,
-                &control,
-            );
+            return nearest_with_control(&src_rgba, job.target_width, job.target_height, &control);
         }
 
         let algorithm = match job.algorithm {
@@ -109,9 +104,7 @@ impl Upscaler for CpuUpscaler {
 
 fn check_cancel(control: &UpscaleControl) -> Result<(), UpscaleError> {
     if control.is_cancelled() {
-        Err(UpscaleError::Cancelled(
-            "CPU resize cancelled".to_string(),
-        ))
+        Err(UpscaleError::Cancelled("CPU resize cancelled".to_string()))
     } else {
         Ok(())
     }
@@ -223,12 +216,10 @@ fn convolution_with_control(
 
     if !need_horizontal && !need_vertical {
         control.report_progress(0, 0, &mut None);
-        let out = image::ImageBuffer::from_raw(
-            src_width,
-            src_height,
-            src_bytes.to_vec(),
-        )
-        .ok_or_else(|| UpscaleError::Unknown("resized image has invalid dimensions".to_string()))?;
+        let out = image::ImageBuffer::from_raw(src_width, src_height, src_bytes.to_vec())
+            .ok_or_else(|| {
+                UpscaleError::Unknown("resized image has invalid dimensions".to_string())
+            })?;
         return Ok(image::DynamicImage::ImageRgba8(out));
     }
 
@@ -254,9 +245,7 @@ fn convolution_with_control(
     let intermediate_bytes = (dst_width as usize)
         .checked_mul(src_height as usize)
         .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| {
-            UpscaleError::Unknown("internal resize buffer size overflow".to_string())
-        })?;
+        .ok_or_else(|| UpscaleError::Unknown("internal resize buffer size overflow".to_string()))?;
     if need_horizontal && intermediate_bytes > INTERNAL_BUFFER_LIMIT {
         return Err(UpscaleError::Unknown(format!(
             "internal resize buffer of {intermediate_bytes} bytes exceeds the 64 MiB limit"
@@ -274,13 +263,8 @@ fn convolution_with_control(
             let in_len = band_rows as usize * src_width as usize * 4;
             let band = src_bytes[in_start..in_start + in_len].to_vec();
 
-            let src_band = Image::from_vec_u8(
-                src_width_nz,
-                band_rows_nz,
-                band,
-                PixelType::U8x4,
-            )
-            .map_err(|e| UpscaleError::Unknown(format!("creating source strip: {e:?}")))?;
+            let src_band = Image::from_vec_u8(src_width_nz, band_rows_nz, band, PixelType::U8x4)
+                .map_err(|e| UpscaleError::Unknown(format!("creating source strip: {e:?}")))?;
             let mut dst_band = Image::new(dst_width_nz, band_rows_nz, PixelType::U8x4);
             resizer
                 .resize(&src_band.view(), &mut dst_band.view_mut())
@@ -327,13 +311,8 @@ fn convolution_with_control(
             strip.extend_from_slice(&intermediate[start..start + strip_row_bytes]);
         }
 
-        let src_strip = Image::from_vec_u8(
-            strip_cols_nz,
-            src_height_nz,
-            strip,
-            PixelType::U8x4,
-        )
-        .map_err(|e| UpscaleError::Unknown(format!("creating source strip: {e:?}")))?;
+        let src_strip = Image::from_vec_u8(strip_cols_nz, src_height_nz, strip, PixelType::U8x4)
+            .map_err(|e| UpscaleError::Unknown(format!("creating source strip: {e:?}")))?;
         let mut dst_strip = Image::new(strip_cols_nz, dst_height_nz, PixelType::U8x4);
         resizer
             .resize(&src_strip.view(), &mut dst_strip.view_mut())
@@ -389,9 +368,7 @@ mod tests {
                 data.push(255);
             }
         }
-        image::DynamicImage::ImageRgba8(
-            image::ImageBuffer::from_raw(width, height, data).unwrap(),
-        )
+        image::DynamicImage::ImageRgba8(image::ImageBuffer::from_raw(width, height, data).unwrap())
     }
 
     /// Original monolithic fast_image_resize path used as the reference.
@@ -481,7 +458,10 @@ mod tests {
         let result = CpuUpscaler.upscale_with_control(&job, &image, control);
         assert!(matches!(result, Err(UpscaleError::Cancelled(_))));
         let reports = reports.lock().unwrap();
-        assert!(!reports.is_empty(), "progress must fire before cancellation");
+        assert!(
+            !reports.is_empty(),
+            "progress must fire before cancellation"
+        );
         assert!(reports[0].0 < reports[0].1, "cancel must happen mid-work");
     }
 

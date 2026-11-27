@@ -35,18 +35,18 @@ static ALLOC: AlignedAllocator = AlignedAllocator;
 use image::ImageBuffer;
 
 // Pull domain modules into this test crate so their `crate::` paths resolve.
-#[path = "../src/upscaler.rs"]
-mod upscaler;
+#[path = "../src/commands.rs"]
+mod commands;
+#[path = "../src/converter.rs"]
+mod converter;
 #[path = "../src/cpu.rs"]
 mod cpu;
 #[path = "../src/gpu.rs"]
 mod gpu;
-#[path = "../src/converter.rs"]
-mod converter;
-#[path = "../src/commands.rs"]
-mod commands;
 #[path = "../src/settings.rs"]
 mod settings;
+#[path = "../src/upscaler.rs"]
+mod upscaler;
 
 use crate::commands::validate_dimensions;
 use crate::converter::Converter;
@@ -85,8 +85,7 @@ fn make_aligned_rgba_image(width: u32, height: u32) -> image::DynamicImage {
         slice[i + 3] = 255;
     }
     let vec = unsafe { Vec::from_raw_parts(ptr, size, size) };
-    let buf = ImageBuffer::from_raw(width, height, vec)
-        .expect("image buffer from raw");
+    let buf = ImageBuffer::from_raw(width, height, vec).expect("image buffer from raw");
     image::DynamicImage::ImageRgba8(buf)
 }
 
@@ -125,8 +124,16 @@ fn cpu_lanczos3_output_size_matches_target() {
         .upscale(&job, &image)
         .expect("CPU Lanczos3 upscale should succeed");
 
-    assert_eq!(result.width(), 200, "output width should match target_width");
-    assert_eq!(result.height(), 200, "output height should match target_height");
+    assert_eq!(
+        result.width(),
+        200,
+        "output width should match target_width"
+    );
+    assert_eq!(
+        result.height(),
+        200,
+        "output height should match target_height"
+    );
 }
 
 #[test]

@@ -48,7 +48,7 @@ flowchart LR
 
 - `tauri.conf.json` 只設定 `frontendDist: gen/dist`，沒有 `devUrl`、`beforeDevCommand`、`beforeBuildCommand`；打包前必須先手動建置前端，否則會包到舊的或不存在的前端。CI 工作流（`.github/workflows/ci.yml`）在打包前自動執行 `npm run build`。
 - 發布物：NSIS 安裝檔、MSI 安裝檔、免安裝執行檔（需系統已有 WebView2），見 `README.md`。GitHub Actions CI 自動執行格式檢查、clippy、測試、前端與 Tauri 建置及版本一致性檢查；發布仍為手動上傳 GitHub Releases。
-- 應用程式識別碼 `com.cookiesincraft.dev`；版本 0.2.0 同時寫在 `src-tauri/Cargo.toml`、`tauri.conf.json`、`src/package.json`。版本號同步腳本（`scripts/sync-version.js`）可在 CI 中以 `--check` 模式驗證三處一致性。
+- 應用程式識別碼 `com.cookiesincraft.dev`；版本 0.2.1 同時寫在 `src-tauri/Cargo.toml`、`tauri.conf.json`、`src/package.json`。版本號同步腳本（`scripts/sync-version.js`）可在 CI 中以 `--check` 模式驗證三處一致性。
 
 ## 執行期設定
 

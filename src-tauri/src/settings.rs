@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::{OnceLock, Mutex};
+use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Manager};
 use tracing::warn;
 
@@ -76,7 +76,8 @@ pub fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("failed to resolve app config dir: {e}"))?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| format!("failed to create config dir: {e}"))?;
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("failed to create config dir: {e}"))?;
     Ok(config_dir.join("settings.json"))
 }
 
@@ -87,7 +88,8 @@ pub fn recent_store_path(app: &AppHandle) -> Result<PathBuf, String> {
         .path()
         .app_config_dir()
         .map_err(|e| format!("failed to resolve app config dir: {e}"))?;
-    std::fs::create_dir_all(&config_dir).map_err(|e| format!("failed to create config dir: {e}"))?;
+    std::fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("failed to create config dir: {e}"))?;
     Ok(config_dir.join("recent.json"))
 }
 
@@ -101,8 +103,8 @@ fn is_app_temp_path(path: &str) -> bool {
 /// Atomically write JSON to `path` via a `.tmp` file then rename.
 fn atomic_write_json(path: &PathBuf, settings: &impl Serialize) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
-    let content =
-        serde_json::to_string_pretty(settings).map_err(|e| format!("serialize settings failed: {e}"))?;
+    let content = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("serialize settings failed: {e}"))?;
     std::fs::write(&tmp, content).map_err(|e| format!("write settings tmp failed: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename settings failed: {e}"))?;
     Ok(())
@@ -239,9 +241,7 @@ mod tests {
         assert!(is_app_temp_path(
             r"C:\Users\foo\AppData\Local\Temp\cookiesincraft\123_456\image.png"
         ));
-        assert!(is_app_temp_path(
-            "/tmp/cookiesincraft/123_456/image.png"
-        ));
+        assert!(is_app_temp_path("/tmp/cookiesincraft/123_456/image.png"));
         assert!(!is_app_temp_path(r"C:\Users\foo\Pictures\image.png"));
         assert!(!is_app_temp_path("/home/foo/image.png"));
     }
@@ -260,7 +260,10 @@ mod tests {
         // Re-adding an existing path moves it to front.
         push_recent_file(&mut store, "e.png");
         assert_eq!(store.recent_files[0], "e.png");
-        assert_eq!(store.recent_files.iter().filter(|p| *p == "e.png").count(), 1);
+        assert_eq!(
+            store.recent_files.iter().filter(|p| *p == "e.png").count(),
+            1
+        );
     }
 
     /// atomic_write_json produces valid JSON that round-trips.

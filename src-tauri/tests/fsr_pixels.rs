@@ -13,12 +13,12 @@ use std::path::PathBuf;
 
 use image::GenericImageView;
 
-#[path = "../src/upscaler.rs"]
-mod upscaler;
 #[path = "../src/cpu.rs"]
 mod cpu;
 #[path = "../src/gpu.rs"]
 mod gpu;
+#[path = "../src/upscaler.rs"]
+mod upscaler;
 
 use crate::gpu::GpuUpscaler;
 use crate::upscaler::{Algorithm, Backend, JobStatus, UpscaleJob, Upscaler};
@@ -121,11 +121,8 @@ fn fsr_easu_alpha_ramp_and_right_bottom_edges() {
 fn fsr_easu_rcas_constant_image_is_stable() {
     let gpu = gpu();
     let src_px = [90u8, 140, 200, 77];
-    let source = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-        64,
-        48,
-        image::Rgba(src_px),
-    ));
+    let source =
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(64, 48, image::Rgba(src_px)));
 
     let out = gpu
         .upscale(&fsr_job("fsr_pixels_const", 128, 96), &source)

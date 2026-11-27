@@ -199,7 +199,9 @@ impl GpuUpscaler {
         };
 
         let (device, queue) = Self::block_on(&instance, adapter.request_device(&desc, None))
-            .map_err(|e| UpscaleError::BackendUnavailable(format!("request_device failed: {e:?}")))?;
+            .map_err(|e| {
+                UpscaleError::BackendUnavailable(format!("request_device failed: {e:?}"))
+            })?;
 
         // Error tracking to avoid panics on validation errors.
         let error_flag = Arc::new(Mutex::new(false));
@@ -525,24 +527,22 @@ impl GpuUpscaler {
                 entries: &anime_conv_entries,
             });
 
-        let pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("gpu upscaler pipeline layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gpu upscaler pipeline layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
         let fsr_easu_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("gpu fsr easu pipeline layout"),
                 bind_group_layouts: &[&fsr_easu_bind_group_layout],
                 push_constant_ranges: &[],
             });
-        let nis_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("gpu nis pipeline layout"),
-                bind_group_layouts: &[&nis_bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let nis_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("gpu nis pipeline layout"),
+            bind_group_layouts: &[&nis_bind_group_layout],
+            push_constant_ranges: &[],
+        });
         let anime_dual_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("gpu anime dual pipeline layout"),
@@ -799,9 +799,7 @@ impl Upscaler for GpuUpscaler {
     ) -> Result<image::DynamicImage, UpscaleError> {
         // Precheck cancelled.
         if control.is_cancelled() {
-            return Err(UpscaleError::Cancelled(
-                "GPU upscale cancelled".to_string(),
-            ));
+            return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
         }
 
         // Check error flag from previous operations.
@@ -813,10 +811,9 @@ impl Upscaler for GpuUpscaler {
         }
 
         let result = match job.algorithm {
-            Algorithm::Bilinear => self.execute_single_pass(
-                job, image, &self.bilinear_pipeline, 0.0,
-                Some(&control),
-            ),
+            Algorithm::Bilinear => {
+                self.execute_single_pass(job, image, &self.bilinear_pipeline, 0.0, Some(&control))
+            }
             Algorithm::Fsr1_0 => self.execute_fsr1_0(job, image, &control),
             Algorithm::Nis => self.execute_nis(job, image, Some(&control)),
             Algorithm::Anime4k => self.execute_anime4k(job, image),
@@ -828,13 +825,13 @@ impl Upscaler for GpuUpscaler {
         };
 
         // Preserve typed result before error flag check.
-        if matches!(&result, Err(UpscaleError::Cancelled(_))) { return result; }
+        if matches!(&result, Err(UpscaleError::Cancelled(_))) {
+            return result;
+        }
 
         // Check cancellation before error flag so user cancel takes precedence.
         if control.is_cancelled() {
-            return Err(UpscaleError::Cancelled(
-                "GPU upscale cancelled".to_string(),
-            ));
+            return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
         }
 
         // Check error flag after execution.
@@ -940,14 +937,18 @@ fn readback_texture(
     drop(mapped);
     staging_buffer.unmap();
 
-    let dst_buffer = image::ImageBuffer::from_raw(width, height, dst_rgba)
-        .ok_or_else(|| UpscaleError::Unknown("readback image has invalid dimensions".to_string()))?;
+    let dst_buffer = image::ImageBuffer::from_raw(width, height, dst_rgba).ok_or_else(|| {
+        UpscaleError::Unknown("readback image has invalid dimensions".to_string())
+    })?;
     Ok(image::DynamicImage::ImageRgba8(dst_buffer))
 }
 
 impl GpuUpscaler {
     /// Create source texture + padded upload for an RGBA8 image.
-    fn create_source_texture(&self, image: &image::DynamicImage) -> Result<(wgpu::Texture, u32, u32), UpscaleError> {
+    fn create_source_texture(
+        &self,
+        image: &image::DynamicImage,
+    ) -> Result<(wgpu::Texture, u32, u32), UpscaleError> {
         let (src_width, src_height) = image.dimensions();
         let src_rgba = image.to_rgba8();
         let src_bytes = src_rgba.as_raw();
@@ -961,7 +962,12 @@ impl GpuUpscaler {
                 padded_src.extend(std::iter::repeat(0u8).take(padded_row - row_bytes));
             }
         }
-        check_gpu_texture_budget(src_width, src_height, wgpu::TextureFormat::Rgba8Unorm, "gpu upscaler source")?;
+        check_gpu_texture_budget(
+            src_width,
+            src_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "gpu upscaler source",
+        )?;
         let source_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gpu upscaler source"),
             size: wgpu::Extent3d {
@@ -1014,7 +1020,12 @@ impl GpuUpscaler {
         let (source_texture, _, _) = self.create_source_texture(image)?;
         let source_view = source_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        check_gpu_texture_budget(dst_width, dst_height, wgpu::TextureFormat::Rgba8Unorm, "gpu upscaler dest")?;
+        check_gpu_texture_budget(
+            dst_width,
+            dst_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "gpu upscaler dest",
+        )?;
         let dest_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("gpu upscaler dest"),
             size: wgpu::Extent3d {
@@ -1043,11 +1054,13 @@ impl GpuUpscaler {
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("gpu upscaler params"),
-            contents: cast_slice(&[params]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("gpu upscaler params"),
+                contents: cast_slice(&[params]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gpu upscaler bind group"),
@@ -1098,14 +1111,11 @@ impl GpuUpscaler {
         // effective without submitting work.
         if let Some(control) = control {
             if control.is_cancelled() {
-                return Err(UpscaleError::Cancelled(
-                    "GPU upscale cancelled".to_string(),
-                ));
+                return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
             }
         }
 
-        self.device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
 
         let mut encoder = self
@@ -1120,24 +1130,19 @@ impl GpuUpscaler {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
-            pass.dispatch_workgroups(
-                (dst_width + 15) / 16,
-                (dst_height + 15) / 16,
-                1,
-            );
+            pass.dispatch_workgroups((dst_width + 15) / 16, (dst_height + 15) / 16, 1);
         }
         if let Some(control) = control {
             if control.is_cancelled() {
                 drop(encoder);
                 let _ = futures::executor::block_on(self.device.pop_error_scope());
                 let _ = futures::executor::block_on(self.device.pop_error_scope());
-                return Err(UpscaleError::Cancelled(
-                    "GPU upscale cancelled".to_string(),
-                ));
+                return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
             }
         }
         let submission_index = self.queue.submit(Some(encoder.finish()));
-        self.device.poll(wgpu::Maintain::WaitForSubmissionIndex(submission_index));
+        self.device
+            .poll(wgpu::Maintain::WaitForSubmissionIndex(submission_index));
 
         // Pop both scopes LIFO and check for GPU errors after submission.
         let oom_err = futures::executor::block_on(self.device.pop_error_scope());
@@ -1152,9 +1157,7 @@ impl GpuUpscaler {
         // Check cancellation before reporting so callback returns typed Cancelled.
         if let Some(control) = control {
             if control.is_cancelled() {
-                return Err(UpscaleError::Cancelled(
-                    "GPU upscale cancelled".to_string(),
-                ));
+                return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
             }
         }
 
@@ -1176,18 +1179,20 @@ impl GpuUpscaler {
         // Recheck immediately before texture readback so callback cancellation
         // returns typed Cancelled.
         if control.map_or(false, |c| c.is_cancelled()) {
-            return Err(UpscaleError::Cancelled(
-                "GPU upscale cancelled".to_string(),
-            ));
+            return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
         }
 
-        let result = readback_texture(&self.device, &self.queue, &dest_texture, dst_width, dst_height);
+        let result = readback_texture(
+            &self.device,
+            &self.queue,
+            &dest_texture,
+            dst_width,
+            dst_height,
+        );
 
         // Honor cancellation after readback like FSR and outer trait.
         if control.map_or(false, |c| c.is_cancelled()) {
-            return Err(UpscaleError::Cancelled(
-                "GPU upscale cancelled".to_string(),
-            ));
+            return Err(UpscaleError::Cancelled("GPU upscale cancelled".to_string()));
         }
 
         result
@@ -1197,7 +1202,7 @@ impl GpuUpscaler {
     // FSR 1.0
     // ========================================================================
 
-fn execute_fsr1_0(
+    fn execute_fsr1_0(
         &self,
         job: &UpscaleJob,
         image: &image::DynamicImage,
@@ -1277,11 +1282,13 @@ fn execute_fsr1_0(
             con2: [-1.0 / in_w, 2.0 / in_h, 1.0 / in_w, 2.0 / in_h],
             con3: [0.0, 4.0 / in_h, 0.0, 0.0],
         };
-        let easu_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("fsr easu constants"),
-            contents: cast_slice(&[easu_consts]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let easu_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fsr easu constants"),
+                contents: cast_slice(&[easu_consts]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         let easu_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fsr easu bind group"),
@@ -1320,11 +1327,7 @@ fn execute_fsr1_0(
             });
             pass.set_pipeline(&self.fsr_easu_pipeline);
             pass.set_bind_group(0, &easu_bind_group, &[]);
-            pass.dispatch_workgroups(
-                (dst_width + 15) / 16,
-                (dst_height + 15) / 16,
-                1,
-            );
+            pass.dispatch_workgroups((dst_width + 15) / 16, (dst_height + 15) / 16, 1);
         }
 
         if control.is_cancelled() {
@@ -1337,7 +1340,8 @@ fn execute_fsr1_0(
         }
 
         let submission_index = self.queue.submit(Some(encoder.finish()));
-        self.device.poll(wgpu::Maintain::WaitForSubmissionIndex(submission_index));
+        self.device
+            .poll(wgpu::Maintain::WaitForSubmissionIndex(submission_index));
 
         // Pop both scopes LIFO and check for GPU errors after EASU submission.
         let oom_err = futures::executor::block_on(self.device.pop_error_scope());
@@ -1361,7 +1365,9 @@ fn execute_fsr1_0(
         control.report_progress(groups, 2 * groups, &mut last_report);
 
         if control.is_cancelled() {
-            return Err(UpscaleError::Cancelled("FSR 1.0 upscale cancelled".to_string()));
+            return Err(UpscaleError::Cancelled(
+                "FSR 1.0 upscale cancelled".to_string(),
+            ));
         }
 
         // ---- RCAS pass ----
@@ -1379,11 +1385,13 @@ fn execute_fsr1_0(
             con: [sharpness, sharpness, 0.0, 0.0],
             _pad: [0.0, 0.0, 0.0],
         };
-        let rcas_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("fsr rcas constants"),
-            contents: cast_slice(&[rcas_consts]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let rcas_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("fsr rcas constants"),
+                contents: cast_slice(&[rcas_consts]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         let dest_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("fsr rcas dest"),
@@ -1432,11 +1440,11 @@ fn execute_fsr1_0(
         });
 
         // RCAS compute pass.
-        let mut rcas_encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("fsr rcas command encoder"),
-            });
+        let mut rcas_encoder =
+            self.device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("fsr rcas command encoder"),
+                });
         {
             let mut pass = rcas_encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("fsr rcas compute pass"),
@@ -1444,11 +1452,7 @@ fn execute_fsr1_0(
             });
             pass.set_pipeline(&self.fsr_rcas_pipeline);
             pass.set_bind_group(0, &rcas_bind_group, &[]);
-            pass.dispatch_workgroups(
-                (dst_width + 15) / 16,
-                (dst_height + 15) / 16,
-                1,
-            );
+            pass.dispatch_workgroups((dst_width + 15) / 16, (dst_height + 15) / 16, 1);
         }
 
         // After RCAS encoding: if cancelled drop encoder and pop both scopes,
@@ -1467,7 +1471,9 @@ fn execute_fsr1_0(
 
         // Submit RCAS encoder and wait for GPU completion.
         let rcas_submission_index = self.queue.submit(Some(rcas_encoder.finish()));
-        self.device.poll(wgpu::Maintain::WaitForSubmissionIndex(rcas_submission_index));
+        self.device.poll(wgpu::Maintain::WaitForSubmissionIndex(
+            rcas_submission_index,
+        ));
 
         // Pop/check both scopes and check GPU errors after RCAS GPU work.
         let oom_err = futures::executor::block_on(self.device.pop_error_scope());
@@ -1487,7 +1493,13 @@ fn execute_fsr1_0(
         }
 
         // Readback.
-        let result = readback_texture(&self.device, &self.queue, &dest_texture, dst_width, dst_height);
+        let result = readback_texture(
+            &self.device,
+            &self.queue,
+            &dest_texture,
+            dst_width,
+            dst_height,
+        );
 
         // Report progress after GPU completion if result is ok and not cancelled.
         let device_ok = !*self.error_flag.lock().unwrap();
@@ -1548,16 +1560,20 @@ fn execute_fsr1_0(
             .iter()
             .flat_map(|row| row.iter().copied().flat_map(|v| v.to_le_bytes()))
             .collect();
-        let coef_scale_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("nis coef_scale"),
-            contents: &coef_scale_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let coef_usm_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("nis coef_usm"),
-            contents: &coef_usm_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let coef_scale_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("nis coef_scale"),
+                contents: &coef_scale_bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let coef_usm_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("nis coef_usm"),
+                contents: &coef_usm_bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+            });
 
         let (source_texture, _, _) = self.create_source_texture(image)?;
         let source_view = source_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1593,11 +1609,13 @@ fn execute_fsr1_0(
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("nis params"),
-            contents: cast_slice(&[params]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("nis params"),
+                contents: cast_slice(&[params]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("nis bind group"),
@@ -1763,10 +1781,16 @@ fn execute_fsr1_0(
         // Helper: run a single-texture conv pass (pipeline index i), writing to
         // a fresh src_w x src_h rgba16float texture.
         let run_single = |pipeline_idx: usize,
-                              input_view: &wgpu::TextureView,
-                              w: u32,
-                              h: u32| -> Result<(wgpu::Texture, wgpu::TextureView), UpscaleError> {
-            check_gpu_texture_budget(w, h, wgpu::TextureFormat::Rgba16Float, "anime conv pass output")?;
+                          input_view: &wgpu::TextureView,
+                          w: u32,
+                          h: u32|
+         -> Result<(wgpu::Texture, wgpu::TextureView), UpscaleError> {
+            check_gpu_texture_budget(
+                w,
+                h,
+                wgpu::TextureFormat::Rgba16Float,
+                "anime conv pass output",
+            )?;
             let out = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("anime conv pass output"),
                 size: wgpu::Extent3d {
@@ -1779,8 +1803,8 @@ fn execute_fsr1_0(
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
                 usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let out_view = out.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1795,11 +1819,13 @@ fn execute_fsr1_0(
                 _pad1: 0.0,
                 _pad2: 0.0,
             };
-            let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("anime params"),
-                contents: cast_slice(&[params]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+            let params_buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("anime params"),
+                    contents: cast_slice(&[params]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
 
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("anime conv bind group"),
@@ -1868,7 +1894,12 @@ fn execute_fsr1_0(
                 "Anime4K conv2d_last expected 7 feature maps".to_string(),
             ));
         }
-        check_gpu_texture_budget(src_w, src_h, wgpu::TextureFormat::Rgba16Float, "anime conv2d_last output")?;
+        check_gpu_texture_budget(
+            src_w,
+            src_h,
+            wgpu::TextureFormat::Rgba16Float,
+            "anime conv2d_last output",
+        )?;
         let out7 = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("anime conv2d_last output"),
             size: wgpu::Extent3d {
@@ -1896,11 +1927,13 @@ fn execute_fsr1_0(
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let last_params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("anime conv2d_last params"),
-            contents: cast_slice(&[last_params]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let last_params_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("anime conv2d_last params"),
+                    contents: cast_slice(&[last_params]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
         let last_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("anime conv2d_last bind group"),
             layout: &self.anime_last_bind_group_layout,
@@ -1949,9 +1982,11 @@ fn execute_fsr1_0(
         });
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("anime conv2d_last command encoder"),
-        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("anime conv2d_last command encoder"),
+            });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("anime conv2d_last compute pass"),
@@ -1986,13 +2021,20 @@ fn execute_fsr1_0(
             _pad1: 0.0,
             _pad2: 0.0,
         };
-        let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("anime depth2space params"),
-            contents: cast_slice(&[params]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("anime depth2space params"),
+                contents: cast_slice(&[params]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
 
-        check_gpu_texture_budget(dst_w, dst_h, wgpu::TextureFormat::Rgba8Unorm, "anime depth2space dest")?;
+        check_gpu_texture_budget(
+            dst_w,
+            dst_h,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "anime depth2space dest",
+        )?;
         let d2s_tex = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("anime depth2space dest"),
             size: wgpu::Extent3d {
@@ -2072,137 +2114,391 @@ fn execute_fsr1_0(
 /// (commit 35e13ba). Shader indexes [phase][0..5] (kFilterSize=6).
 const NIS_COEF_SCALE: [[f32; 8]; 64] = [
     [0f32, 0f32, 1f32, 0f32, 0f32, 0f32, 0f32, 0f32],
-    [0.0029f32, -0.0127f32, 1f32, 0.0132f32, -0.0034f32, 0f32, 0f32, 0f32],
-    [0.0063f32, -0.0249f32, 0.9985f32, 0.0269f32, -0.0068f32, 0f32, 0f32, 0f32],
-    [0.0088f32, -0.0361f32, 0.9956f32, 0.0415f32, -0.0103f32, 0.0005f32, 0f32, 0f32],
-    [0.0117f32, -0.0474f32, 0.9932f32, 0.0562f32, -0.0142f32, 0.0005f32, 0f32, 0f32],
-    [0.0142f32, -0.0576f32, 0.9897f32, 0.0713f32, -0.0181f32, 0.0005f32, 0f32, 0f32],
-    [0.0166f32, -0.0674f32, 0.9844f32, 0.0874f32, -0.022f32, 0.001f32, 0f32, 0f32],
-    [0.0186f32, -0.0762f32, 0.9785f32, 0.104f32, -0.0264f32, 0.0015f32, 0f32, 0f32],
-    [0.0205f32, -0.085f32, 0.9727f32, 0.1206f32, -0.0308f32, 0.002f32, 0f32, 0f32],
-    [0.0225f32, -0.0928f32, 0.9648f32, 0.1382f32, -0.0352f32, 0.0024f32, 0f32, 0f32],
-    [0.0239f32, -0.1006f32, 0.9575f32, 0.1558f32, -0.0396f32, 0.0029f32, 0f32, 0f32],
-    [0.0254f32, -0.1074f32, 0.9487f32, 0.1738f32, -0.0439f32, 0.0034f32, 0f32, 0f32],
-    [0.0264f32, -0.1138f32, 0.939f32, 0.1929f32, -0.0488f32, 0.0044f32, 0f32, 0f32],
-    [0.0278f32, -0.1191f32, 0.9282f32, 0.2119f32, -0.0537f32, 0.0049f32, 0f32, 0f32],
-    [0.0288f32, -0.1245f32, 0.917f32, 0.231f32, -0.0581f32, 0.0059f32, 0f32, 0f32],
-    [0.0293f32, -0.1294f32, 0.9058f32, 0.251f32, -0.063f32, 0.0063f32, 0f32, 0f32],
-    [0.0303f32, -0.1333f32, 0.8926f32, 0.271f32, -0.0679f32, 0.0073f32, 0f32, 0f32],
-    [0.0308f32, -0.1367f32, 0.8789f32, 0.2915f32, -0.0728f32, 0.0083f32, 0f32, 0f32],
-    [0.0308f32, -0.1401f32, 0.8657f32, 0.312f32, -0.0776f32, 0.0093f32, 0f32, 0f32],
-    [0.0313f32, -0.1426f32, 0.8506f32, 0.333f32, -0.0825f32, 0.0103f32, 0f32, 0f32],
-    [0.0313f32, -0.1445f32, 0.8354f32, 0.354f32, -0.0874f32, 0.0112f32, 0f32, 0f32],
-    [0.0313f32, -0.146f32, 0.8193f32, 0.3755f32, -0.0923f32, 0.0122f32, 0f32, 0f32],
-    [0.0313f32, -0.147f32, 0.8022f32, 0.3965f32, -0.0967f32, 0.0137f32, 0f32, 0f32],
-    [0.0308f32, -0.1479f32, 0.7856f32, 0.4185f32, -0.1016f32, 0.0146f32, 0f32, 0f32],
-    [0.0303f32, -0.1479f32, 0.7681f32, 0.4399f32, -0.106f32, 0.0156f32, 0f32, 0f32],
-    [0.0298f32, -0.1479f32, 0.7505f32, 0.4614f32, -0.1104f32, 0.0166f32, 0f32, 0f32],
-    [0.0293f32, -0.147f32, 0.7314f32, 0.4829f32, -0.1147f32, 0.0181f32, 0f32, 0f32],
-    [0.0288f32, -0.146f32, 0.7119f32, 0.5049f32, -0.1187f32, 0.019f32, 0f32, 0f32],
-    [0.0278f32, -0.1445f32, 0.6929f32, 0.5264f32, -0.1226f32, 0.02f32, 0f32, 0f32],
-    [0.0273f32, -0.1431f32, 0.6724f32, 0.5479f32, -0.126f32, 0.0215f32, 0f32, 0f32],
-    [0.0264f32, -0.1411f32, 0.6528f32, 0.5693f32, -0.1299f32, 0.0225f32, 0f32, 0f32],
-    [0.0254f32, -0.1387f32, 0.6323f32, 0.5903f32, -0.1328f32, 0.0234f32, 0f32, 0f32],
-    [0.0244f32, -0.1357f32, 0.6113f32, 0.6113f32, -0.1357f32, 0.0244f32, 0f32, 0f32],
-    [0.0234f32, -0.1328f32, 0.5903f32, 0.6323f32, -0.1387f32, 0.0254f32, 0f32, 0f32],
-    [0.0225f32, -0.1299f32, 0.5693f32, 0.6528f32, -0.1411f32, 0.0264f32, 0f32, 0f32],
-    [0.0215f32, -0.126f32, 0.5479f32, 0.6724f32, -0.1431f32, 0.0273f32, 0f32, 0f32],
-    [0.02f32, -0.1226f32, 0.5264f32, 0.6929f32, -0.1445f32, 0.0278f32, 0f32, 0f32],
-    [0.019f32, -0.1187f32, 0.5049f32, 0.7119f32, -0.146f32, 0.0288f32, 0f32, 0f32],
-    [0.0181f32, -0.1147f32, 0.4829f32, 0.7314f32, -0.147f32, 0.0293f32, 0f32, 0f32],
-    [0.0166f32, -0.1104f32, 0.4614f32, 0.7505f32, -0.1479f32, 0.0298f32, 0f32, 0f32],
-    [0.0156f32, -0.106f32, 0.4399f32, 0.7681f32, -0.1479f32, 0.0303f32, 0f32, 0f32],
-    [0.0146f32, -0.1016f32, 0.4185f32, 0.7856f32, -0.1479f32, 0.0308f32, 0f32, 0f32],
-    [0.0137f32, -0.0967f32, 0.3965f32, 0.8022f32, -0.147f32, 0.0313f32, 0f32, 0f32],
-    [0.0122f32, -0.0923f32, 0.3755f32, 0.8193f32, -0.146f32, 0.0313f32, 0f32, 0f32],
-    [0.0112f32, -0.0874f32, 0.354f32, 0.8354f32, -0.1445f32, 0.0313f32, 0f32, 0f32],
-    [0.0103f32, -0.0825f32, 0.333f32, 0.8506f32, -0.1426f32, 0.0313f32, 0f32, 0f32],
-    [0.0093f32, -0.0776f32, 0.312f32, 0.8657f32, -0.1401f32, 0.0308f32, 0f32, 0f32],
-    [0.0083f32, -0.0728f32, 0.2915f32, 0.8789f32, -0.1367f32, 0.0308f32, 0f32, 0f32],
-    [0.0073f32, -0.0679f32, 0.271f32, 0.8926f32, -0.1333f32, 0.0303f32, 0f32, 0f32],
-    [0.0063f32, -0.063f32, 0.251f32, 0.9058f32, -0.1294f32, 0.0293f32, 0f32, 0f32],
-    [0.0059f32, -0.0581f32, 0.231f32, 0.917f32, -0.1245f32, 0.0288f32, 0f32, 0f32],
-    [0.0049f32, -0.0537f32, 0.2119f32, 0.9282f32, -0.1191f32, 0.0278f32, 0f32, 0f32],
-    [0.0044f32, -0.0488f32, 0.1929f32, 0.939f32, -0.1138f32, 0.0264f32, 0f32, 0f32],
-    [0.0034f32, -0.0439f32, 0.1738f32, 0.9487f32, -0.1074f32, 0.0254f32, 0f32, 0f32],
-    [0.0029f32, -0.0396f32, 0.1558f32, 0.9575f32, -0.1006f32, 0.0239f32, 0f32, 0f32],
-    [0.0024f32, -0.0352f32, 0.1382f32, 0.9648f32, -0.0928f32, 0.0225f32, 0f32, 0f32],
-    [0.002f32, -0.0308f32, 0.1206f32, 0.9727f32, -0.085f32, 0.0205f32, 0f32, 0f32],
-    [0.0015f32, -0.0264f32, 0.104f32, 0.9785f32, -0.0762f32, 0.0186f32, 0f32, 0f32],
-    [0.001f32, -0.022f32, 0.0874f32, 0.9844f32, -0.0674f32, 0.0166f32, 0f32, 0f32],
-    [0.0005f32, -0.0181f32, 0.0713f32, 0.9897f32, -0.0576f32, 0.0142f32, 0f32, 0f32],
-    [0.0005f32, -0.0142f32, 0.0562f32, 0.9932f32, -0.0474f32, 0.0117f32, 0f32, 0f32],
-    [0.0005f32, -0.0103f32, 0.0415f32, 0.9956f32, -0.0361f32, 0.0088f32, 0f32, 0f32],
-    [0f32, -0.0068f32, 0.0269f32, 0.9985f32, -0.0249f32, 0.0063f32, 0f32, 0f32],
-    [0f32, -0.0034f32, 0.0132f32, 1f32, -0.0127f32, 0.0029f32, 0f32, 0f32],
+    [
+        0.0029f32, -0.0127f32, 1f32, 0.0132f32, -0.0034f32, 0f32, 0f32, 0f32,
+    ],
+    [
+        0.0063f32, -0.0249f32, 0.9985f32, 0.0269f32, -0.0068f32, 0f32, 0f32, 0f32,
+    ],
+    [
+        0.0088f32, -0.0361f32, 0.9956f32, 0.0415f32, -0.0103f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0117f32, -0.0474f32, 0.9932f32, 0.0562f32, -0.0142f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0142f32, -0.0576f32, 0.9897f32, 0.0713f32, -0.0181f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0166f32, -0.0674f32, 0.9844f32, 0.0874f32, -0.022f32, 0.001f32, 0f32, 0f32,
+    ],
+    [
+        0.0186f32, -0.0762f32, 0.9785f32, 0.104f32, -0.0264f32, 0.0015f32, 0f32, 0f32,
+    ],
+    [
+        0.0205f32, -0.085f32, 0.9727f32, 0.1206f32, -0.0308f32, 0.002f32, 0f32, 0f32,
+    ],
+    [
+        0.0225f32, -0.0928f32, 0.9648f32, 0.1382f32, -0.0352f32, 0.0024f32, 0f32, 0f32,
+    ],
+    [
+        0.0239f32, -0.1006f32, 0.9575f32, 0.1558f32, -0.0396f32, 0.0029f32, 0f32, 0f32,
+    ],
+    [
+        0.0254f32, -0.1074f32, 0.9487f32, 0.1738f32, -0.0439f32, 0.0034f32, 0f32, 0f32,
+    ],
+    [
+        0.0264f32, -0.1138f32, 0.939f32, 0.1929f32, -0.0488f32, 0.0044f32, 0f32, 0f32,
+    ],
+    [
+        0.0278f32, -0.1191f32, 0.9282f32, 0.2119f32, -0.0537f32, 0.0049f32, 0f32, 0f32,
+    ],
+    [
+        0.0288f32, -0.1245f32, 0.917f32, 0.231f32, -0.0581f32, 0.0059f32, 0f32, 0f32,
+    ],
+    [
+        0.0293f32, -0.1294f32, 0.9058f32, 0.251f32, -0.063f32, 0.0063f32, 0f32, 0f32,
+    ],
+    [
+        0.0303f32, -0.1333f32, 0.8926f32, 0.271f32, -0.0679f32, 0.0073f32, 0f32, 0f32,
+    ],
+    [
+        0.0308f32, -0.1367f32, 0.8789f32, 0.2915f32, -0.0728f32, 0.0083f32, 0f32, 0f32,
+    ],
+    [
+        0.0308f32, -0.1401f32, 0.8657f32, 0.312f32, -0.0776f32, 0.0093f32, 0f32, 0f32,
+    ],
+    [
+        0.0313f32, -0.1426f32, 0.8506f32, 0.333f32, -0.0825f32, 0.0103f32, 0f32, 0f32,
+    ],
+    [
+        0.0313f32, -0.1445f32, 0.8354f32, 0.354f32, -0.0874f32, 0.0112f32, 0f32, 0f32,
+    ],
+    [
+        0.0313f32, -0.146f32, 0.8193f32, 0.3755f32, -0.0923f32, 0.0122f32, 0f32, 0f32,
+    ],
+    [
+        0.0313f32, -0.147f32, 0.8022f32, 0.3965f32, -0.0967f32, 0.0137f32, 0f32, 0f32,
+    ],
+    [
+        0.0308f32, -0.1479f32, 0.7856f32, 0.4185f32, -0.1016f32, 0.0146f32, 0f32, 0f32,
+    ],
+    [
+        0.0303f32, -0.1479f32, 0.7681f32, 0.4399f32, -0.106f32, 0.0156f32, 0f32, 0f32,
+    ],
+    [
+        0.0298f32, -0.1479f32, 0.7505f32, 0.4614f32, -0.1104f32, 0.0166f32, 0f32, 0f32,
+    ],
+    [
+        0.0293f32, -0.147f32, 0.7314f32, 0.4829f32, -0.1147f32, 0.0181f32, 0f32, 0f32,
+    ],
+    [
+        0.0288f32, -0.146f32, 0.7119f32, 0.5049f32, -0.1187f32, 0.019f32, 0f32, 0f32,
+    ],
+    [
+        0.0278f32, -0.1445f32, 0.6929f32, 0.5264f32, -0.1226f32, 0.02f32, 0f32, 0f32,
+    ],
+    [
+        0.0273f32, -0.1431f32, 0.6724f32, 0.5479f32, -0.126f32, 0.0215f32, 0f32, 0f32,
+    ],
+    [
+        0.0264f32, -0.1411f32, 0.6528f32, 0.5693f32, -0.1299f32, 0.0225f32, 0f32, 0f32,
+    ],
+    [
+        0.0254f32, -0.1387f32, 0.6323f32, 0.5903f32, -0.1328f32, 0.0234f32, 0f32, 0f32,
+    ],
+    [
+        0.0244f32, -0.1357f32, 0.6113f32, 0.6113f32, -0.1357f32, 0.0244f32, 0f32, 0f32,
+    ],
+    [
+        0.0234f32, -0.1328f32, 0.5903f32, 0.6323f32, -0.1387f32, 0.0254f32, 0f32, 0f32,
+    ],
+    [
+        0.0225f32, -0.1299f32, 0.5693f32, 0.6528f32, -0.1411f32, 0.0264f32, 0f32, 0f32,
+    ],
+    [
+        0.0215f32, -0.126f32, 0.5479f32, 0.6724f32, -0.1431f32, 0.0273f32, 0f32, 0f32,
+    ],
+    [
+        0.02f32, -0.1226f32, 0.5264f32, 0.6929f32, -0.1445f32, 0.0278f32, 0f32, 0f32,
+    ],
+    [
+        0.019f32, -0.1187f32, 0.5049f32, 0.7119f32, -0.146f32, 0.0288f32, 0f32, 0f32,
+    ],
+    [
+        0.0181f32, -0.1147f32, 0.4829f32, 0.7314f32, -0.147f32, 0.0293f32, 0f32, 0f32,
+    ],
+    [
+        0.0166f32, -0.1104f32, 0.4614f32, 0.7505f32, -0.1479f32, 0.0298f32, 0f32, 0f32,
+    ],
+    [
+        0.0156f32, -0.106f32, 0.4399f32, 0.7681f32, -0.1479f32, 0.0303f32, 0f32, 0f32,
+    ],
+    [
+        0.0146f32, -0.1016f32, 0.4185f32, 0.7856f32, -0.1479f32, 0.0308f32, 0f32, 0f32,
+    ],
+    [
+        0.0137f32, -0.0967f32, 0.3965f32, 0.8022f32, -0.147f32, 0.0313f32, 0f32, 0f32,
+    ],
+    [
+        0.0122f32, -0.0923f32, 0.3755f32, 0.8193f32, -0.146f32, 0.0313f32, 0f32, 0f32,
+    ],
+    [
+        0.0112f32, -0.0874f32, 0.354f32, 0.8354f32, -0.1445f32, 0.0313f32, 0f32, 0f32,
+    ],
+    [
+        0.0103f32, -0.0825f32, 0.333f32, 0.8506f32, -0.1426f32, 0.0313f32, 0f32, 0f32,
+    ],
+    [
+        0.0093f32, -0.0776f32, 0.312f32, 0.8657f32, -0.1401f32, 0.0308f32, 0f32, 0f32,
+    ],
+    [
+        0.0083f32, -0.0728f32, 0.2915f32, 0.8789f32, -0.1367f32, 0.0308f32, 0f32, 0f32,
+    ],
+    [
+        0.0073f32, -0.0679f32, 0.271f32, 0.8926f32, -0.1333f32, 0.0303f32, 0f32, 0f32,
+    ],
+    [
+        0.0063f32, -0.063f32, 0.251f32, 0.9058f32, -0.1294f32, 0.0293f32, 0f32, 0f32,
+    ],
+    [
+        0.0059f32, -0.0581f32, 0.231f32, 0.917f32, -0.1245f32, 0.0288f32, 0f32, 0f32,
+    ],
+    [
+        0.0049f32, -0.0537f32, 0.2119f32, 0.9282f32, -0.1191f32, 0.0278f32, 0f32, 0f32,
+    ],
+    [
+        0.0044f32, -0.0488f32, 0.1929f32, 0.939f32, -0.1138f32, 0.0264f32, 0f32, 0f32,
+    ],
+    [
+        0.0034f32, -0.0439f32, 0.1738f32, 0.9487f32, -0.1074f32, 0.0254f32, 0f32, 0f32,
+    ],
+    [
+        0.0029f32, -0.0396f32, 0.1558f32, 0.9575f32, -0.1006f32, 0.0239f32, 0f32, 0f32,
+    ],
+    [
+        0.0024f32, -0.0352f32, 0.1382f32, 0.9648f32, -0.0928f32, 0.0225f32, 0f32, 0f32,
+    ],
+    [
+        0.002f32, -0.0308f32, 0.1206f32, 0.9727f32, -0.085f32, 0.0205f32, 0f32, 0f32,
+    ],
+    [
+        0.0015f32, -0.0264f32, 0.104f32, 0.9785f32, -0.0762f32, 0.0186f32, 0f32, 0f32,
+    ],
+    [
+        0.001f32, -0.022f32, 0.0874f32, 0.9844f32, -0.0674f32, 0.0166f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0181f32, 0.0713f32, 0.9897f32, -0.0576f32, 0.0142f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0142f32, 0.0562f32, 0.9932f32, -0.0474f32, 0.0117f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0103f32, 0.0415f32, 0.9956f32, -0.0361f32, 0.0088f32, 0f32, 0f32,
+    ],
+    [
+        0f32, -0.0068f32, 0.0269f32, 0.9985f32, -0.0249f32, 0.0063f32, 0f32, 0f32,
+    ],
+    [
+        0f32, -0.0034f32, 0.0132f32, 1f32, -0.0127f32, 0.0029f32, 0f32, 0f32,
+    ],
 ];
 
 /// NIS coef_usm table (64 phases x 8 taps) from NIS_Config.h:341
 const NIS_COEF_USM: [[f32; 8]; 64] = [
-    [0f32, -0.6001f32, 1.2002f32, -0.6001f32, 0f32, 0f32, 0f32, 0f32],
-    [0.0029f32, -0.6084f32, 1.1987f32, -0.5903f32, -0.0029f32, 0f32, 0f32, 0f32],
-    [0.0049f32, -0.6147f32, 1.1958f32, -0.5791f32, -0.0068f32, 0.0005f32, 0f32, 0f32],
-    [0.0073f32, -0.6196f32, 1.189f32, -0.5659f32, -0.0103f32, 0f32, 0f32, 0f32],
-    [0.0093f32, -0.6235f32, 1.1802f32, -0.5513f32, -0.0151f32, 0f32, 0f32, 0f32],
-    [0.0112f32, -0.6265f32, 1.1699f32, -0.5352f32, -0.0195f32, 0.0005f32, 0f32, 0f32],
-    [0.0122f32, -0.627f32, 1.1582f32, -0.5181f32, -0.0259f32, 0.0005f32, 0f32, 0f32],
-    [0.0142f32, -0.6284f32, 1.1455f32, -0.5005f32, -0.0317f32, 0.0005f32, 0f32, 0f32],
-    [0.0156f32, -0.6265f32, 1.1274f32, -0.479f32, -0.0386f32, 0.0005f32, 0f32, 0f32],
-    [0.0166f32, -0.6235f32, 1.1089f32, -0.457f32, -0.0454f32, 0.001f32, 0f32, 0f32],
-    [0.0176f32, -0.6187f32, 1.0879f32, -0.4346f32, -0.0532f32, 0.001f32, 0f32, 0f32],
-    [0.0181f32, -0.6138f32, 1.0659f32, -0.4102f32, -0.0615f32, 0.0015f32, 0f32, 0f32],
-    [0.019f32, -0.6069f32, 1.0405f32, -0.3843f32, -0.0698f32, 0.0015f32, 0f32, 0f32],
-    [0.0195f32, -0.6006f32, 1.0161f32, -0.3574f32, -0.0796f32, 0.002f32, 0f32, 0f32],
-    [0.02f32, -0.5928f32, 0.9893f32, -0.3286f32, -0.0898f32, 0.0024f32, 0f32, 0f32],
-    [0.02f32, -0.582f32, 0.958f32, -0.2988f32, -0.1001f32, 0.0029f32, 0f32, 0f32],
-    [0.02f32, -0.5728f32, 0.9292f32, -0.269f32, -0.1104f32, 0.0034f32, 0f32, 0f32],
-    [0.02f32, -0.562f32, 0.8975f32, -0.2368f32, -0.1226f32, 0.0039f32, 0f32, 0f32],
-    [0.0205f32, -0.5498f32, 0.8643f32, -0.2046f32, -0.1343f32, 0.0044f32, 0f32, 0f32],
-    [0.02f32, -0.5371f32, 0.8301f32, -0.1709f32, -0.1465f32, 0.0049f32, 0f32, 0f32],
-    [0.0195f32, -0.5239f32, 0.7944f32, -0.1367f32, -0.1587f32, 0.0054f32, 0f32, 0f32],
-    [0.0195f32, -0.5107f32, 0.7598f32, -0.1021f32, -0.1724f32, 0.0059f32, 0f32, 0f32],
-    [0.019f32, -0.4966f32, 0.7231f32, -0.0649f32, -0.1865f32, 0.0063f32, 0f32, 0f32],
-    [0.0186f32, -0.4819f32, 0.6846f32, -0.0288f32, -0.1997f32, 0.0068f32, 0f32, 0f32],
-    [0.0186f32, -0.4668f32, 0.646f32, 0.0093f32, -0.2144f32, 0.0073f32, 0f32, 0f32],
-    [0.0176f32, -0.4507f32, 0.6055f32, 0.0479f32, -0.229f32, 0.0083f32, 0f32, 0f32],
-    [0.0171f32, -0.437f32, 0.5693f32, 0.0859f32, -0.2446f32, 0.0088f32, 0f32, 0f32],
-    [0.0161f32, -0.4199f32, 0.5283f32, 0.1255f32, -0.2598f32, 0.0098f32, 0f32, 0f32],
-    [0.0161f32, -0.4048f32, 0.4883f32, 0.1655f32, -0.2754f32, 0.0103f32, 0f32, 0f32],
-    [0.0151f32, -0.3887f32, 0.4497f32, 0.2041f32, -0.291f32, 0.0107f32, 0f32, 0f32],
-    [0.0142f32, -0.3711f32, 0.4072f32, 0.2446f32, -0.3066f32, 0.0117f32, 0f32, 0f32],
-    [0.0137f32, -0.3555f32, 0.3672f32, 0.2852f32, -0.3228f32, 0.0122f32, 0f32, 0f32],
-    [0.0132f32, -0.3394f32, 0.3262f32, 0.3262f32, -0.3394f32, 0.0132f32, 0f32, 0f32],
-    [0.0122f32, -0.3228f32, 0.2852f32, 0.3672f32, -0.3555f32, 0.0137f32, 0f32, 0f32],
-    [0.0117f32, -0.3066f32, 0.2446f32, 0.4072f32, -0.3711f32, 0.0142f32, 0f32, 0f32],
-    [0.0107f32, -0.291f32, 0.2041f32, 0.4497f32, -0.3887f32, 0.0151f32, 0f32, 0f32],
-    [0.0103f32, -0.2754f32, 0.1655f32, 0.4883f32, -0.4048f32, 0.0161f32, 0f32, 0f32],
-    [0.0098f32, -0.2598f32, 0.1255f32, 0.5283f32, -0.4199f32, 0.0161f32, 0f32, 0f32],
-    [0.0088f32, -0.2446f32, 0.0859f32, 0.5693f32, -0.437f32, 0.0171f32, 0f32, 0f32],
-    [0.0083f32, -0.229f32, 0.0479f32, 0.6055f32, -0.4507f32, 0.0176f32, 0f32, 0f32],
-    [0.0073f32, -0.2144f32, 0.0093f32, 0.646f32, -0.4668f32, 0.0186f32, 0f32, 0f32],
-    [0.0068f32, -0.1997f32, -0.0288f32, 0.6846f32, -0.4819f32, 0.0186f32, 0f32, 0f32],
-    [0.0063f32, -0.1865f32, -0.0649f32, 0.7231f32, -0.4966f32, 0.019f32, 0f32, 0f32],
-    [0.0059f32, -0.1724f32, -0.1021f32, 0.7598f32, -0.5107f32, 0.0195f32, 0f32, 0f32],
-    [0.0054f32, -0.1587f32, -0.1367f32, 0.7944f32, -0.5239f32, 0.0195f32, 0f32, 0f32],
-    [0.0049f32, -0.1465f32, -0.1709f32, 0.8301f32, -0.5371f32, 0.02f32, 0f32, 0f32],
-    [0.0044f32, -0.1343f32, -0.2046f32, 0.8643f32, -0.5498f32, 0.0205f32, 0f32, 0f32],
-    [0.0039f32, -0.1226f32, -0.2368f32, 0.8975f32, -0.562f32, 0.02f32, 0f32, 0f32],
-    [0.0034f32, -0.1104f32, -0.269f32, 0.9292f32, -0.5728f32, 0.02f32, 0f32, 0f32],
-    [0.0029f32, -0.1001f32, -0.2988f32, 0.958f32, -0.582f32, 0.02f32, 0f32, 0f32],
-    [0.0024f32, -0.0898f32, -0.3286f32, 0.9893f32, -0.5928f32, 0.02f32, 0f32, 0f32],
-    [0.002f32, -0.0796f32, -0.3574f32, 1.0161f32, -0.6006f32, 0.0195f32, 0f32, 0f32],
-    [0.0015f32, -0.0698f32, -0.3843f32, 1.0405f32, -0.6069f32, 0.019f32, 0f32, 0f32],
-    [0.0015f32, -0.0615f32, -0.4102f32, 1.0659f32, -0.6138f32, 0.0181f32, 0f32, 0f32],
-    [0.001f32, -0.0532f32, -0.4346f32, 1.0879f32, -0.6187f32, 0.0176f32, 0f32, 0f32],
-    [0.001f32, -0.0454f32, -0.457f32, 1.1089f32, -0.6235f32, 0.0166f32, 0f32, 0f32],
-    [0.0005f32, -0.0386f32, -0.479f32, 1.1274f32, -0.6265f32, 0.0156f32, 0f32, 0f32],
-    [0.0005f32, -0.0317f32, -0.5005f32, 1.1455f32, -0.6284f32, 0.0142f32, 0f32, 0f32],
-    [0.0005f32, -0.0259f32, -0.5181f32, 1.1582f32, -0.627f32, 0.0122f32, 0f32, 0f32],
-    [0.0005f32, -0.0195f32, -0.5352f32, 1.1699f32, -0.6265f32, 0.0112f32, 0f32, 0f32],
-    [0f32, -0.0151f32, -0.5513f32, 1.1802f32, -0.6235f32, 0.0093f32, 0f32, 0f32],
-    [0f32, -0.0103f32, -0.5659f32, 1.189f32, -0.6196f32, 0.0073f32, 0f32, 0f32],
-    [0.0005f32, -0.0068f32, -0.5791f32, 1.1958f32, -0.6147f32, 0.0049f32, 0f32, 0f32],
-    [0f32, -0.0029f32, -0.5903f32, 1.1987f32, -0.6084f32, 0.0029f32, 0f32, 0f32],
+    [
+        0f32, -0.6001f32, 1.2002f32, -0.6001f32, 0f32, 0f32, 0f32, 0f32,
+    ],
+    [
+        0.0029f32, -0.6084f32, 1.1987f32, -0.5903f32, -0.0029f32, 0f32, 0f32, 0f32,
+    ],
+    [
+        0.0049f32, -0.6147f32, 1.1958f32, -0.5791f32, -0.0068f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0073f32, -0.6196f32, 1.189f32, -0.5659f32, -0.0103f32, 0f32, 0f32, 0f32,
+    ],
+    [
+        0.0093f32, -0.6235f32, 1.1802f32, -0.5513f32, -0.0151f32, 0f32, 0f32, 0f32,
+    ],
+    [
+        0.0112f32, -0.6265f32, 1.1699f32, -0.5352f32, -0.0195f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0122f32, -0.627f32, 1.1582f32, -0.5181f32, -0.0259f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0142f32, -0.6284f32, 1.1455f32, -0.5005f32, -0.0317f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0156f32, -0.6265f32, 1.1274f32, -0.479f32, -0.0386f32, 0.0005f32, 0f32, 0f32,
+    ],
+    [
+        0.0166f32, -0.6235f32, 1.1089f32, -0.457f32, -0.0454f32, 0.001f32, 0f32, 0f32,
+    ],
+    [
+        0.0176f32, -0.6187f32, 1.0879f32, -0.4346f32, -0.0532f32, 0.001f32, 0f32, 0f32,
+    ],
+    [
+        0.0181f32, -0.6138f32, 1.0659f32, -0.4102f32, -0.0615f32, 0.0015f32, 0f32, 0f32,
+    ],
+    [
+        0.019f32, -0.6069f32, 1.0405f32, -0.3843f32, -0.0698f32, 0.0015f32, 0f32, 0f32,
+    ],
+    [
+        0.0195f32, -0.6006f32, 1.0161f32, -0.3574f32, -0.0796f32, 0.002f32, 0f32, 0f32,
+    ],
+    [
+        0.02f32, -0.5928f32, 0.9893f32, -0.3286f32, -0.0898f32, 0.0024f32, 0f32, 0f32,
+    ],
+    [
+        0.02f32, -0.582f32, 0.958f32, -0.2988f32, -0.1001f32, 0.0029f32, 0f32, 0f32,
+    ],
+    [
+        0.02f32, -0.5728f32, 0.9292f32, -0.269f32, -0.1104f32, 0.0034f32, 0f32, 0f32,
+    ],
+    [
+        0.02f32, -0.562f32, 0.8975f32, -0.2368f32, -0.1226f32, 0.0039f32, 0f32, 0f32,
+    ],
+    [
+        0.0205f32, -0.5498f32, 0.8643f32, -0.2046f32, -0.1343f32, 0.0044f32, 0f32, 0f32,
+    ],
+    [
+        0.02f32, -0.5371f32, 0.8301f32, -0.1709f32, -0.1465f32, 0.0049f32, 0f32, 0f32,
+    ],
+    [
+        0.0195f32, -0.5239f32, 0.7944f32, -0.1367f32, -0.1587f32, 0.0054f32, 0f32, 0f32,
+    ],
+    [
+        0.0195f32, -0.5107f32, 0.7598f32, -0.1021f32, -0.1724f32, 0.0059f32, 0f32, 0f32,
+    ],
+    [
+        0.019f32, -0.4966f32, 0.7231f32, -0.0649f32, -0.1865f32, 0.0063f32, 0f32, 0f32,
+    ],
+    [
+        0.0186f32, -0.4819f32, 0.6846f32, -0.0288f32, -0.1997f32, 0.0068f32, 0f32, 0f32,
+    ],
+    [
+        0.0186f32, -0.4668f32, 0.646f32, 0.0093f32, -0.2144f32, 0.0073f32, 0f32, 0f32,
+    ],
+    [
+        0.0176f32, -0.4507f32, 0.6055f32, 0.0479f32, -0.229f32, 0.0083f32, 0f32, 0f32,
+    ],
+    [
+        0.0171f32, -0.437f32, 0.5693f32, 0.0859f32, -0.2446f32, 0.0088f32, 0f32, 0f32,
+    ],
+    [
+        0.0161f32, -0.4199f32, 0.5283f32, 0.1255f32, -0.2598f32, 0.0098f32, 0f32, 0f32,
+    ],
+    [
+        0.0161f32, -0.4048f32, 0.4883f32, 0.1655f32, -0.2754f32, 0.0103f32, 0f32, 0f32,
+    ],
+    [
+        0.0151f32, -0.3887f32, 0.4497f32, 0.2041f32, -0.291f32, 0.0107f32, 0f32, 0f32,
+    ],
+    [
+        0.0142f32, -0.3711f32, 0.4072f32, 0.2446f32, -0.3066f32, 0.0117f32, 0f32, 0f32,
+    ],
+    [
+        0.0137f32, -0.3555f32, 0.3672f32, 0.2852f32, -0.3228f32, 0.0122f32, 0f32, 0f32,
+    ],
+    [
+        0.0132f32, -0.3394f32, 0.3262f32, 0.3262f32, -0.3394f32, 0.0132f32, 0f32, 0f32,
+    ],
+    [
+        0.0122f32, -0.3228f32, 0.2852f32, 0.3672f32, -0.3555f32, 0.0137f32, 0f32, 0f32,
+    ],
+    [
+        0.0117f32, -0.3066f32, 0.2446f32, 0.4072f32, -0.3711f32, 0.0142f32, 0f32, 0f32,
+    ],
+    [
+        0.0107f32, -0.291f32, 0.2041f32, 0.4497f32, -0.3887f32, 0.0151f32, 0f32, 0f32,
+    ],
+    [
+        0.0103f32, -0.2754f32, 0.1655f32, 0.4883f32, -0.4048f32, 0.0161f32, 0f32, 0f32,
+    ],
+    [
+        0.0098f32, -0.2598f32, 0.1255f32, 0.5283f32, -0.4199f32, 0.0161f32, 0f32, 0f32,
+    ],
+    [
+        0.0088f32, -0.2446f32, 0.0859f32, 0.5693f32, -0.437f32, 0.0171f32, 0f32, 0f32,
+    ],
+    [
+        0.0083f32, -0.229f32, 0.0479f32, 0.6055f32, -0.4507f32, 0.0176f32, 0f32, 0f32,
+    ],
+    [
+        0.0073f32, -0.2144f32, 0.0093f32, 0.646f32, -0.4668f32, 0.0186f32, 0f32, 0f32,
+    ],
+    [
+        0.0068f32, -0.1997f32, -0.0288f32, 0.6846f32, -0.4819f32, 0.0186f32, 0f32, 0f32,
+    ],
+    [
+        0.0063f32, -0.1865f32, -0.0649f32, 0.7231f32, -0.4966f32, 0.019f32, 0f32, 0f32,
+    ],
+    [
+        0.0059f32, -0.1724f32, -0.1021f32, 0.7598f32, -0.5107f32, 0.0195f32, 0f32, 0f32,
+    ],
+    [
+        0.0054f32, -0.1587f32, -0.1367f32, 0.7944f32, -0.5239f32, 0.0195f32, 0f32, 0f32,
+    ],
+    [
+        0.0049f32, -0.1465f32, -0.1709f32, 0.8301f32, -0.5371f32, 0.02f32, 0f32, 0f32,
+    ],
+    [
+        0.0044f32, -0.1343f32, -0.2046f32, 0.8643f32, -0.5498f32, 0.0205f32, 0f32, 0f32,
+    ],
+    [
+        0.0039f32, -0.1226f32, -0.2368f32, 0.8975f32, -0.562f32, 0.02f32, 0f32, 0f32,
+    ],
+    [
+        0.0034f32, -0.1104f32, -0.269f32, 0.9292f32, -0.5728f32, 0.02f32, 0f32, 0f32,
+    ],
+    [
+        0.0029f32, -0.1001f32, -0.2988f32, 0.958f32, -0.582f32, 0.02f32, 0f32, 0f32,
+    ],
+    [
+        0.0024f32, -0.0898f32, -0.3286f32, 0.9893f32, -0.5928f32, 0.02f32, 0f32, 0f32,
+    ],
+    [
+        0.002f32, -0.0796f32, -0.3574f32, 1.0161f32, -0.6006f32, 0.0195f32, 0f32, 0f32,
+    ],
+    [
+        0.0015f32, -0.0698f32, -0.3843f32, 1.0405f32, -0.6069f32, 0.019f32, 0f32, 0f32,
+    ],
+    [
+        0.0015f32, -0.0615f32, -0.4102f32, 1.0659f32, -0.6138f32, 0.0181f32, 0f32, 0f32,
+    ],
+    [
+        0.001f32, -0.0532f32, -0.4346f32, 1.0879f32, -0.6187f32, 0.0176f32, 0f32, 0f32,
+    ],
+    [
+        0.001f32, -0.0454f32, -0.457f32, 1.1089f32, -0.6235f32, 0.0166f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0386f32, -0.479f32, 1.1274f32, -0.6265f32, 0.0156f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0317f32, -0.5005f32, 1.1455f32, -0.6284f32, 0.0142f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0259f32, -0.5181f32, 1.1582f32, -0.627f32, 0.0122f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0195f32, -0.5352f32, 1.1699f32, -0.6265f32, 0.0112f32, 0f32, 0f32,
+    ],
+    [
+        0f32, -0.0151f32, -0.5513f32, 1.1802f32, -0.6235f32, 0.0093f32, 0f32, 0f32,
+    ],
+    [
+        0f32, -0.0103f32, -0.5659f32, 1.189f32, -0.6196f32, 0.0073f32, 0f32, 0f32,
+    ],
+    [
+        0.0005f32, -0.0068f32, -0.5791f32, 1.1958f32, -0.6147f32, 0.0049f32, 0f32, 0f32,
+    ],
+    [
+        0f32, -0.0029f32, -0.5903f32, 1.1987f32, -0.6084f32, 0.0029f32, 0f32, 0f32,
+    ],
 ];
 
 /// Return a reference to the NIS coef_scale table.
