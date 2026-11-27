@@ -34,6 +34,7 @@ const btnConvert = $("btnConvert")
 // Batch elements
 const btnSelectBatch = $("btnSelectBatch")
 const btnStartBatch = $("btnStartBatch")
+const btnCancelBatch = $("btnCancelBatch")
 const batchFileList = $("batchFileList")
 const batchProgressFill = $("batchProgressFill")
 const batchProgressPct = $("batchProgressPct")
@@ -51,11 +52,13 @@ const toastContainer = $("toastContainer")
 // ---- Algorithm options by backend ----
 const ALGORITHMS = {
   cpu: ["Nearest", "Bilinear", "CatmullRom", "Lanczos3"],
-  gpu: ["FSR 1.0", "Anime4K", "NIS"],
+  // GPU-implemented algorithms (ported per opencode-gpu-port.md):
+  // FSR 1.0 (EASU + RCAS), NIS, Anime4K (CNN x2 M), plus the explicit bilinear path.
+  gpu: ["Bilinear", "FSR 1.0", "Anime4K", "NIS"],
 }
 
 // ---- State ----
-let currentFile = null   // { path, name, width, height }
+let currentFile = null   // { path, name, width, height, isTemp }
 let currentJobId = null
 let outputPath = null
 let upscaleChannel = null
@@ -70,6 +73,8 @@ let settings = {
 }
 let batchFiles = []
 let batchChannel = null
+let currentBatchId = null
+let previewObjectUrl = null  // R5: controlled PNG blob URL, revoked on replace
 
 // ---- Utils ----
 function setStatus(msg, kind = "muted") {
@@ -82,6 +87,26 @@ function setProgress(pct) {
   const v = Math.max(0, Math.min(100, pct))
   progressFill.style.width = v + "%"
   progressPct.textContent = v + "%"
+}
+
+// R5: controlled PNG blob preview. Revoke the previous object URL before
+// assigning a new one so blob URLs are not leaked across loads/upscales.
+function dataUrlToBlob(dataUrl) {
+  const [, b64] = dataUrl.split(";base64,")
+  const bytes = atob(b64)
+  const buf = new Uint8Array(bytes.length)
+  for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i)
+  return new Blob([buf], { type: "image/png" })
+}
+
+function setPreviewImage(dataUrl) {
+  if (previewObjectUrl) {
+    URL.revokeObjectURL(previewObjectUrl)
+    previewObjectUrl = null
+  }
+  const blob = dataUrlToBlob(dataUrl)
+  previewObjectUrl = URL.createObjectURL(blob)
+  previewImg.src = previewObjectUrl
 }
 
 // ---- Settings persistence ----
@@ -113,7 +138,7 @@ async function saveSettings() {
       keep_aspect_ratio: keepAspectRatio.checked,
       filename_template: filenameTemplate.value,
     }
-    await invoke("write_settings", settings)
+    await invoke("write_settings", { settings })
   } catch (err) {
     console.error("Save settings failed:", err)
     setStatus("Save settings failed: " + String(err), "err")
@@ -159,7 +184,10 @@ function renderRecentFiles(files) {
 
 // Resolve output path from settings: output_folder + filename_template.
 // Sanitizes the template to block path traversal.
-function resolveOutputPath(inputPath) {
+// `index` (when given) is retained for batch items even if {name} is not expanded
+// in the template, ensuring distinct output names for same-named batch inputs.
+// Sanitizer fallback uses output_<index>.<ext> for batch and output.<ext> for single.
+function resolveOutputPath(inputPath, index = null) {
   const outFolder = settings.output_folder
   const template = settings.filename_template || "{name}_upscaled_{scale}x.{ext}"
 
@@ -171,14 +199,30 @@ function resolveOutputPath(inputPath) {
   const [tw, th] = resolutionSelect.value.split("x").map(Number)
   const scale = keepAspectRatio.checked ? Math.min(tw, th) : tw
 
+  let stem = name
+  if (index !== null && index !== undefined) stem = `${name}_${index}`
+
   let filename = template
-    .replace(/\{name\}/g, name)
+    .replace(/\{name\}/g, stem)
     .replace(/\{scale\}/g, scale)
     .replace(/\{ext\}/g, ext)
 
-  // Sanitize: block path traversal characters (Security X3)
+  // Sanitize: block path traversal characters FIRST (Security X3)
   filename = filename.replace(/[\\/:*?"<>|]/g, "_")
-  if (filename === ".." || filename.includes("..")) filename = "output." + ext
+
+  // Check for path traversal after sanitization
+  if (filename === ".." || filename.includes("..")) {
+    filename = index !== null && index !== undefined ? "output_" + index + "." + ext : "output." + ext
+  } else if (!template.includes('{name}') && index !== null && index !== undefined) {
+    // Template has no {name} placeholder and index is provided, add index suffix
+    // before the last file extension to ensure distinct batch output names.
+    const lastDot = filename.lastIndexOf('.')
+    if (lastDot !== -1) {
+      filename = filename.slice(0, lastDot) + '_' + index + filename.slice(lastDot)
+    } else {
+      filename = filename + '_' + index
+    }
+  }
 
   if (outFolder) {
     return outFolder.endsWith("\\") || outFolder.endsWith("/")
@@ -215,20 +259,23 @@ function renderBatchFileList() {
 
 async function startBatchUpscale() {
   if (batchFiles.length === 0) return
+  currentBatchId = null
+  btnCancelBatch.disabled = true
   const [width, height] = resolutionSelect.value.split("x").map(Number)
 
-  const items = batchFiles.map(inputPath => ({
+  const items = batchFiles.map((inputPath, index) => ({
     input_path: inputPath,
-    output_path: null, // backend resolves via output_folder + filename_template
+    output_path: resolveOutputPath(inputPath, index), // saved folder + template, unique per item
   }))
 
   try {
     batchChannel = new Channel()
-    batchChannel.onmessage = (event) => {
-      const data = event.data
+    batchChannel.onmessage = (data) => {
       switch (data.event) {
         case "Started":
           batchStatus.textContent = `Batch started: ${data.total} items`
+          currentBatchId = data.batch_id
+          btnCancelBatch.disabled = false
           break
         case "Progress": {
           const pct = Math.round((data.done / data.total) * 100)
@@ -250,18 +297,24 @@ async function startBatchUpscale() {
           batchStatus.textContent = `Batch done: ${data.successes} succeeded, ${data.failures} failed`
           btnStartBatch.disabled = false
           btnSelectBatch.disabled = false
+          currentBatchId = null
+          btnCancelBatch.disabled = true
           break
         case "Cancelled":
           batchChannel = null
           batchStatus.textContent = "Batch cancelled"
           btnStartBatch.disabled = false
           btnSelectBatch.disabled = false
+          currentBatchId = null
+          btnCancelBatch.disabled = true
           break
         case "Failed":
           batchChannel = null
           batchStatus.textContent = "Batch failed: " + data.error
           btnStartBatch.disabled = false
           btnSelectBatch.disabled = false
+          currentBatchId = null
+          btnCancelBatch.disabled = true
           break
       }
     }
@@ -270,20 +323,39 @@ async function startBatchUpscale() {
     btnSelectBatch.disabled = true
 
     await invoke("batch_upscale", {
-      items,
-      backend: backendSelect.value,
-      algorithm: algorithmSelect.value,
-      keep_aspect_ratio: keepAspectRatio.checked,
-      target_width: width,
-      target_height: height,
-      quality: Number(qualityInput.value) || undefined,
-    }, batchChannel)
+      dto: {
+        items,
+        backend: backendSelect.value,
+        algorithm: algorithmSelect.value,
+        keep_aspect_ratio: keepAspectRatio.checked,
+        target_width: width,
+        target_height: height,
+        quality: Number(qualityInput.value) || undefined,
+      },
+      onEvent: batchChannel,
+    })
   } catch (err) {
     console.error("Batch upscale error:", err)
     batchStatus.textContent = "Batch failed: " + String(err)
     btnStartBatch.disabled = false
     btnSelectBatch.disabled = false
     batchChannel = null
+    currentBatchId = null
+    btnCancelBatch.disabled = true
+  }
+}
+
+async function cancelBatchUpscale() {
+  if (currentBatchId === null) return
+  const id = currentBatchId
+  btnCancelBatch.disabled = true
+  try {
+    await invoke("cancel_job", { id })
+  } catch (err) {
+    console.error("Cancel batch failed:", err)
+    if (currentBatchId === id) {
+      btnCancelBatch.disabled = false
+    }
   }
 }
 
@@ -411,10 +483,11 @@ async function loadImageFromBase64(file) {
           name: file.name,
           width: result.image_meta.width,
           height: result.image_meta.height,
+          isTemp: true, // drag-drop source lives in app temp
         }
         fileName.textContent = currentFile.name
         fileName.className = "file-name"
-        previewImg.src = result.image_meta.preview
+        setPreviewImage(result.image_meta.preview)
         previewPlaceholder.classList.add("hidden")
         previewImg.classList.remove("hidden")
         setStatus(
@@ -483,12 +556,13 @@ async function loadImagePath(path) {
       name: path.split(/[/\\]/).pop(),
       width: meta.width,
       height: meta.height,
+      isTemp: false, // file-dialog source is a real user path
     }
     fileName.textContent = currentFile.name
     fileName.className = "file-name"
 
-    // Base64 data URL from Rust — no convertFileSrc needed.
-    previewImg.src = meta.preview
+    // Base64 data URL from Rust — shown as a controlled PNG blob URL (R5).
+    setPreviewImage(meta.preview)
     previewPlaceholder.classList.add("hidden")
     previewImg.classList.remove("hidden")
 
@@ -541,6 +615,22 @@ function saveFiltersFor(ext) {
   const [name, ...exts] = SAVE_FILTERS[idx]
   const preferred = [name, ext, ...exts.filter((e) => e !== ext)]
   return [preferred, ...SAVE_FILTERS.filter((_, i) => i !== idx)]
+}
+
+// True when `path` lives under the app's isolated temp directory (drag-drop
+// source). Outputs written here would evaporate on restart/cleanup, so a real
+// output location must be required instead.
+function isAppTempPath(path) {
+  if (!path) return false
+  const p = path.replace(/\\/g, "/")
+  return p.includes("/cookiesincraft/") || p.includes("\\cookiesincraft\\")
+}
+
+// True when the current input came from drag-and-drop (app temp). Outputs
+// written next to a temp source would evaporate on restart/cleanup, so a real
+// output location must be required instead.
+function isTempSource() {
+  return !!currentFile && currentFile.isTemp
 }
 
 // ---- Wire UI ----
@@ -624,6 +714,7 @@ btnSelectBatch.addEventListener("click", async () => {
 })
 
 btnStartBatch.addEventListener("click", startBatchUpscale)
+btnCancelBatch.addEventListener("click", cancelBatchUpscale)
 
 // ---- Start Upscale ----
 btnStart.addEventListener("click", async () => {
@@ -633,6 +724,15 @@ btnStart.addEventListener("click", async () => {
   }
 
   const [width, height] = resolutionSelect.value.split("x").map(Number)
+
+  // 8K (7680x4320) exceeds the 4096 validate_dimensions limit. Reject up
+  // front unless keep-aspect-ratio is checked (frontend pre-calculates within
+  // bounds); never let the backend blow up.
+  if (!keepAspectRatio.checked && (width > 4096 || height > 4096)) {
+    setStatus("此解析度超過 4096×4096 上限，請勾選「保持長寬比」或選擇較小尺寸", "err")
+    showToast("8K 解析度超過上限，請勾選保持長寬比或選擇較小尺寸", "err")
+    return
+  }
 
   let targetWidth = width
   let targetHeight = height
@@ -648,20 +748,50 @@ btnStart.addEventListener("click", async () => {
       targetWidth = targetShort
       targetHeight = Math.round(targetShort / ratio)
     }
-    // Clamp to 4096×4096 limit (validate_dimensions)
-    if (targetWidth > 4096) targetWidth = 4096
-    if (targetHeight > 4096) targetHeight = 4096
+    // Clamp to 4096×4096 limit without distorting aspect ratio:
+    // after clamping one axis, rescale the other to keep the ratio.
+    if (targetWidth > 4096) {
+      targetWidth = 4096
+      targetHeight = Math.round(targetWidth / ratio)
+    }
+    if (targetHeight > 4096) {
+      targetHeight = 4096
+      targetWidth = Math.round(targetHeight * ratio)
+    }
   }
 
   const out = resolveOutputPath(currentFile.path)
 
+  // Dropped input lives in app temp: output must not evaporate there.
+  // Require an actual output directory (or native save dialog result) before
+  // starting; never write generated output into app temp.
+  let finalOut = out
+  if (isTempSource() && isAppTempPath(finalOut)) {
+    setStatus("拖放來源為暫存檔，請選擇真實輸出資料夾", "warn")
+    showToast("輸出不得寫入暫存目錄，請選擇輸出資料夾", "warn")
+    const folder = await invoke("select_output_folder")
+    if (!folder) {
+      setStatus("已取消：未選擇輸出資料夾", "warn")
+      return
+    }
+    outputFolder.value = folder
+    await saveSettings()
+    finalOut = resolveOutputPath(currentFile.path)
+    if (isAppTempPath(finalOut)) {
+      setStatus("選擇的資料夾仍在暫存目錄內，請重新選擇非暫存資料夾", "err")
+      return
+    }
+    setStatus(`輸出資料夾：${folder}`, "ok")
+  }
+
   // Overwrite confirmation (R2)
-  const overwriteResult = await confirmOverwrite(out)
+  const overwriteResult = await confirmOverwrite(finalOut)
   if (overwriteResult.action === "cancel") {
     setStatus("Cancelled", "warn")
     return
   }
   outputPath = overwriteResult.finalPath
+  const shouldOverwrite = overwriteResult.action === "overwrite"
 
   const payload = {
     job: {
@@ -673,6 +803,7 @@ btnStart.addEventListener("click", async () => {
       target_height: targetHeight,
       jpeg_quality: Number(qualityInput.value) || undefined,
       keep_aspect_ratio: keepAspectRatio.checked,
+      overwrite: shouldOverwrite,
     },
   }
 
@@ -681,8 +812,7 @@ btnStart.addEventListener("click", async () => {
     upscaleChannel = new Channel()
 
     // Listen for progress events from the backend
-    upscaleChannel.onmessage = (event) => {
-      const data = event.data
+    upscaleChannel.onmessage = (data) => {
       switch (data.event) {
         case "Started":
           currentJobId = data.job_id
@@ -695,10 +825,6 @@ btnStart.addEventListener("click", async () => {
           currentJobId = null
           upscaleChannel = null
           setProgress(100)
-          // Update preview with upscaled result (R3)
-          if (data.result.preview) {
-            previewImg.src = data.result.preview
-          }
           // Toast notification on fallback (R4)
           if (data.result.used_fallback && data.result.fallback_reason) {
             setStatus(`Upscale complete (GPU fallback: ${data.result.fallback_reason})`, "ok")
@@ -709,8 +835,9 @@ btnStart.addEventListener("click", async () => {
           btnStart.disabled = false
           btnCancel.disabled = true
           btnExport.disabled = false
-          saveSettings()
-          addRecentFile(data.result.output_path)
+          // Preview + settings + recent file are applied once from the
+          // authoritative invoke return value below (R2: render preview once,
+          // no duplicate settings writes).
           break
         case "Cancelled":
           currentJobId = null
@@ -744,17 +871,39 @@ btnStart.addEventListener("click", async () => {
         target_height: targetHeight,
         jpeg_quality: Number(qualityInput.value) || undefined,
         keep_aspect_ratio: keepAspectRatio.checked,
+        overwrite: shouldOverwrite,
       },
       onEvent: upscaleChannel,
     })
 
-    // The Channel handles all progress, so we don't need to do anything here
-    // The onmessage handler will process the Completed event
+    // Channel Completed also updates the UI. Apply the return value here so a
+    // missed event still shows the preview, status, and saved path.
+    if (result) {
+      if (result.output_path) outputPath = result.output_path
+      if (result.preview) setPreviewImage(result.preview)
+      setProgress(100)
+      // Status/toast already applied from the Completed event above;
+      // do not duplicate here (avoids double toast on fallback).
+      if (result.used_fallback && result.fallback_reason) {
+        setStatus(`Upscale complete (GPU fallback: ${result.fallback_reason})`, "ok")
+      } else {
+        setStatus("Upscale complete.", "ok")
+      }
+      addRecentFile(result.output_path || outputPath)
+      saveSettings()
+    }
+    btnStart.disabled = false
+    btnCancel.disabled = true
+    btnExport.disabled = false
   } catch (err) {
     console.error("Upscale error:", err)
     setStatus("Upscale failed: " + String(err), "err")
     upscaleChannel = null  // Clear channel on error
-    resetJob()
+    // Preserve failed status (do not reset to Idle); restore button states.
+    btnStart.disabled = false
+    btnCancel.disabled = true
+    btnExport.disabled = !!outputPath
+    btnConvert.disabled = !currentFile
   }
 })
 

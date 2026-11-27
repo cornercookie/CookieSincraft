@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-select-multiple-images"
+description = "Enables the select_multiple_images command without any pre-configured scope."
+commands.allow = ["select_multiple_images"]
+
+[[permission]]
+identifier = "deny-select-multiple-images"
+description = "Denies the select_multiple_images command without any pre-configured scope."
+commands.deny = ["select_multiple_images"]

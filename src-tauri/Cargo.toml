@@ -14,11 +14,13 @@ tauri-build = { version = "2.0.0-beta", features = [] }
 tauri = { version = "2.0.0-beta", features = ["tray-icon", "wry"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-image = { version = "0.24", features = ["png", "jpeg", "gif", "webp", "pnm", "tiff", "bmp", "ico", "hdr"] }
+image = { version = "0.24", features = ["png", "jpeg", "gif", "pnm", "tiff", "bmp", "ico", "hdr"] }
+image-webp = "0.2.4"
 fast_image_resize = "0.7"
 wgpu = { version = "0.19", features = ["dx12", "vulkan-portability"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 rfd = "0.13"
+same-file = "1.0.6"
 base64 = "0.22"
 futures = "0.3"
 tokio = { version = "1.0", features = ["full"] }
@@ -27,3 +29,8 @@ tracing = { version = "0.1", features = ["std"] }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 tracing-appender = "0.2"
 dirs = "5.0"
+
+[dev-dependencies]
+# WGSL front-end (naga 0.19, matching wgpu 0.19) used by the shader parse test
+# in gpu.rs / integration tests: every include_str! WGSL must parse cleanly.
+naga = { version = "0.19.2", features = ["wgsl-in"] }

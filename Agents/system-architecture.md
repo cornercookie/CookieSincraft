@@ -2,9 +2,9 @@
 
 | 文件資訊 | 內容 |
 | --- | --- |
-| 版本／建立／更新 | v1.3／2026-11-23／2026-11-23 |
-| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：技術堆疊、目錄結構、建置與發布流程、執行期設定、GPU／CPU 放大子系統、非功能性特性。v1.1 GPU 著色器現況改為本機實測結果（Anime4K、NIS 因著色器解析錯誤 panic）。v1.2 #[#3] 程式碼清理與 CI 建置：移除 `integration_test.rs` 全域配置器，新增 `aligned_allocator_tests.rs` 獨立測試二進制；新增 `.github/workflows/ci.yml` CI 工作流與 `scripts/sync-version.js` 版本同步腳本；移除 `gpu.rs`/`app.js` 除錯輸出；加入 `validate_dimensions` 4096×4096 尺寸上限。v1.3 #[#4] 功能增強-可選：新增 `settings.rs` 設定檔模組、`read_settings`/`write_settings`/`add_recent_file`/`batch_upscale`/`select_output_folder`/`select_multiple_images` 指令；`upscale` 已為非同步並透過 `Channel<UpscaleProgress>` 回報進度；批次處理採 `batch_progress` 事件式總進度 |
-| 權威來源 | `Cargo.toml`、`src-tauri/Cargo.toml`、`Cargo.lock`、`src-tauri/tauri.conf.json`、`src/package.json`、`src/vite.config.js`、`src-tauri/src/main.rs`、`src-tauri/src/gpu.rs`、`src-tauri/src/cpu.rs` |
+| 版本／建立／更新 | v1.5／2026-11-27／2026-11-27 |
+| 變更摘要 | v1.5 依 opencode-gpu-port.md 增加 GPU 演算法：FSR 1.0（EASU＋RCAS，`fsr_easu.wgsl`／`fsr_rcas.wgsl`，上游 commit a21ffb8）、NIS（`nis_scaler.wgsl`，上傳 64×8 係數並由 NVScaler 索引，上游 commit 35e13ba）、Anime4K CNN x2 M（`anime4k_cnn_passes/` 9 個 pass，上游 commit 7684e95），並與 Bilinear 共用 wgpu 裝置、錯誤旗標與錯誤區域（`gpu.rs`）；新增 `scripts/glsl_to_wgsl_anime4k.py` 轉換腳本與其產物。`error_flag` 與 `on_uncaptured_error` 為同一 Arc；GPU 失敗回 `Err`，由 `commands.rs` 改跑 CPU Lanczos3。測試 1–3 已通過，視為「已移植」。 |
+| 權威來源 | `Cargo.toml`、`src-tauri/Cargo.toml`、`Cargo.lock`、`src-tauri/tauri.conf.json`、`src/package.json`、`src/vite.config.js`、`src-tauri/src/main.rs`、`src-tauri/src/gpu.rs`、`src-tauri/src/cpu.rs`、`src-tauri/shaders/bilinear.wgsl`、`src-tauri/shaders/fsr_easu.wgsl`、`src-tauri/shaders/fsr_rcas.wgsl`、`src-tauri/shaders/nis_scaler.wgsl`、`src-tauri/shaders/anime4k_cnn_passes/*.wgsl`、`scripts/glsl_to_wgsl_anime4k.py` |
 
 ## 技術堆疊
 
@@ -27,7 +27,7 @@
 | `Cargo.toml` | Cargo 工作區，成員只有 `src-tauri` |
 | `src/` | 前端原始碼與 npm 設定；`npm run build` 輸出到 `src-tauri/gen/dist` |
 | `src-tauri/src/` | `main.rs`（啟動與指令註冊）、`commands.rs`、`converter.rs`、`cpu.rs`、`gpu.rs`、`upscaler.rs` |
-| `src-tauri/shaders/` | 四個 `.wgsl` 檔；程式未引用，實際執行的著色器內嵌在 `gpu.rs` 的 `shaders` 模組 |
+| `src-tauri/shaders/` | 著色器：`bilinear.wgsl`（雙線性）、`fsr_easu.wgsl`／`fsr_rcas.wgsl`（FSR 1.0 兩 pass）、`nis_scaler.wgsl`（NIS NVScaler，binding 4/5 為係數緩衝）、`anime4k_cnn_passes/`（Anime4K CNN x2 M，9 個 pass，由 `scripts/glsl_to_wgsl_anime4k.py` 從上游 GLSL 機械產生）。程式以 `include_str!` 嵌入 `gpu.rs`。 |
 | `src-tauri/tests/integration_test.rs` | 整合測試，不再宣告全域配置器；對齊配置器測試移至 `aligned_allocator_tests.rs` |
 | `src-tauri/tests/aligned_allocator_tests.rs` | 新增：獨立測試二進制檔，宣告 `#[global_allocator]` 僅作用於本二進制 |
 | `src-tauri/icons/` | 應用程式與系統匣圖示 |
@@ -63,19 +63,28 @@ flowchart TB
     cmd["commands::upscale"] --> sel{"backend"}
     sel -->|cpu| cpu["CpuUpscaler<br/>fast_image_resize"]
     sel -->|gpu| new["GpuUpscaler::new<br/>建立 wgpu 實例與裝置"]
-    new --> shader["upscale_shader<br/>上傳材質 → 運算著色器 → 讀回"]
-    new -.->|"失敗"| fb["改用 CpuUpscaler"]
+    new --> sel2{"algorithm"}
+    sel2 -->|Bilinear| bil["bilinear pipeline"]
+    sel2 -->|FSR 1.0| fsr["EASU (rgba16float) → RCAS"]
+    sel2 -->|NIS| nis["NVScaler pipeline<br/>coef_scale／coef_usm 64×8"]
+    sel2 -->|Anime4K| anime["9-pass CNN x2 M<br/>conv×7 → conv2d_last → depth2space"]
+    bil --> shader["上傳材質 → 運算著色器 → 讀回"]
+    fsr --> shader
+    nis --> shader
+    anime --> shader
+    new -.->|"失敗"| fb["改用 CpuUpscaler<br/>Lanczos3"]
     shader -.->|"失敗"| fb
 ```
 
 - **GPU：** 每次放大都重新建立 wgpu 實例、介面卡與裝置，不快取（`gpu.rs:215`）。只列舉 DX12 介面卡並取第一個（`gpu.rs:219`）；沒有 DX12 介面卡時回傳「backend unavailable」。來源列以 256 bytes 對齊上傳，16×16 工作群組運算後複製到暫存緩衝區讀回。三個演算法共用同一套繫結配置與參數緩衝區。
-- **GPU 著色器現況：** 內嵌 WGSL 無法通過 wgpu 驗證，`create_shader_module` 直接 panic。2026-11-22 在本機（有 DX12 介面卡）以暫時測試呼叫 `upscale` 實測：Anime4K、NIS 皆 panic，訊息為「Shader 'gpu upscaler shader' parsing error: name `sampler` is a reserved keyword」；著色器另含 `let mut`、`fn fx2(vec2 v: vec2<f32>)` 等非 WGSL 語法（`gpu.rs:38`、`gpu.rs:65`）。對齊配置器測試以 `catch_unwind` 吞掉此 panic（`aligned_allocator_tests.rs`）。目前 GPU 路徑無法產出結果。
+- **GPU：** 每次放大都重新建立 wgpu 實例、介面卡與裝置，不快取（`gpu.rs`）。只列舉 DX12 介面卡並取第一個；沒有 DX12 介面卡時回傳「backend unavailable」。來源列以 256 bytes 對齊上傳，16×16 工作群組運算後複製到暫存緩衝區讀回。各演算法共用同一套繫結配置（單紋理 pass 與 NIS 雙係數緩衝 pass、Anime4K 雙來源 pass）與參數緩衝區。
+- **GPU 著色器：** `bilinear.wgsl`、`fsr_easu.wgsl`、`fsr_rcas.wgsl`、`nis_scaler.wgsl` 與 `anime4k_cnn_passes/` 9 個 pass 的 `@binding` 與 Rust bind group layout 對齊（binding 0 材質、1 sampler、2 storage、3 uniform；NIS 額外 binding 4/5 為唯讀係數儲存緩衝；Anime4K 7/8 用雙來源繫結）。FSR 1.0 EASU 以 `textureLoad`＋邊界夾取實作 12-tap（非 3×3 銳化），中繼 rgba16float，RGB 走 FSR、alpha 以原圖雙線性；RCAS sharpness＝exp2(-stops)，預設 `RCAS_DEFAULT_STOPS`（非上游指定預設），alpha 穿透。NIS 上傳 64×8 係數並由 WGSL 索引（非死表），單軸 1×–2×。Anime4K 權重機械複製自上游 GLSL（如 `0.16265294`）。`create_shader_module_safe` / `create_compute_pipeline_safe` 以 `catch_unwind` 將 wgpu 驗證 panic 轉成 `Err`，`error_flag` 為 `on_uncaptured_error` 寫入的同一 Arc。GPU 失敗時備援 CPU Lanczos3。
 - **CPU：** 強制使用純量路徑 `CpuExtensions::None`（`cpu.rs:111`），避開 `fast_image_resize` 的 AVX2／SSE4 路徑在 Lanczos3 讀取未對齊係數時 panic；來源像素另複製到 16-byte 對齊緩衝區（`cpu.rs:71`）。
 - **執行緒：** 大部分指令為同步函式（未標 `async`），依 Tauri 2 規則在主執行緒執行；`upscale` 已為非同步（`pub async fn`），透過 `tokio::task::spawn_blocking` 在背景執行放大，並以 `Channel<UpscaleProgress>` 回報進度，放大期間視窗可回應。`batch_upscale` 亦為非同步，透過 `batch_progress` 事件回報批次總進度。一次處理一個放大工作（`running_jobs` 互斥），期間無法發起新的單次 `upscale`。
 
 ## 非功能性特性
 
-- **記憶體：** 整張圖解碼進記憶體並轉為 RGBA8，放大過程同時存在來源、對齊副本與輸出緩衝區。目標尺寸上限 4096×4096（對應約 64 MB RGBA8 緩衝區），超出尺寸會被 `validate_dimensions` 拒絕；8K 輸出（7680×4320）單一 RGBA8 緩衝區約 133 MB，目前仍會被尺寸上限阻擋。
+- **記憶體：** 整張圖解碼進記憶體並轉為 RGBA8，放大過程同時存在來源、對齊副本與輸出緩衝區。目標尺寸上限 4096×4096（對應約 64 MB RGBA8 緩衝區），超出尺寸會被 `validate_dimensions` 拒絕；8K 輸出（7680×4320）單一 RGBA8 緩衝區約 133 MB，超過 4096 上限。未勾選保持長寬比時，前端會在送出前拒絕 8K（`src/app.js:638-646`），不會讓後端尺寸檢查失敗。
 - **效能：** CPU 放大使用純量路徑，沒有 SIMD 加速；GPU 每次重建裝置有固定啟動成本。沒有量測基準。
 - **併發：** 沒有工作佇列；一次處理一個放大工作，期間主執行緒阻塞。
 - **可用性：** 純本機運作，不需網路。GPU 不可用時的設計是改用 CPU，實際限制見[業務邏輯](business-logic.md)的「GPU→CPU 備援」。

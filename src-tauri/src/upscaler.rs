@@ -6,6 +6,8 @@
 //! here; those are added in later tasks.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use image::DynamicImage;
 
@@ -105,6 +107,9 @@ pub enum UpscaleError {
     UnsupportedAlgorithm(String),
     /// The fallback backend/algorithm also failed.
     FallbackFailed(String),
+    /// The job was cancelled via the shared `UpscaleControl` token before
+    /// completing any work, or partway through.
+    Cancelled(String),
     /// An unspecified error.
     Unknown(String),
 }
@@ -122,8 +127,75 @@ impl std::fmt::Display for UpscaleError {
                 write!(f, "unsupported algorithm: {msg}")
             }
             UpscaleError::FallbackFailed(msg) => write!(f, "fallback failed: {msg}"),
+            UpscaleError::Cancelled(msg) => write!(f, "cancelled: {msg}"),
             UpscaleError::Unknown(msg) => write!(f, "upscale error: {msg}"),
         }
+    }
+}
+
+/// Shared cancellation token for an upscaling job.
+///
+/// An `Arc<AtomicBool>` lets the caller (commands.rs / frontend) request
+/// cancellation from another thread, while the upscaler checks it at
+/// coarse-grained checkpoints without altering sampling coordinates.
+///
+/// # Progress callback
+///
+/// `on_progress` receives `(completed, total)` where both are actual units of
+/// work already finished (source rows consumed / destination rows written,
+/// depending on the pass). It is called at most once per 10% step, with a
+/// minimum 100 ms gap between reports, except that 100% is always reported
+/// on completion. Implementers should not use timers to fake progress.
+#[derive(Clone)]
+pub struct UpscaleControl {
+    /// Shared cancel flag. Set to `true` by the caller to request cancellation.
+    pub cancel: Arc<AtomicBool>,
+    /// Optional progress callback: `(completed, total)` in actual work units.
+    pub on_progress: Option<Arc<dyn Fn(usize, usize) + Send + Sync>>,
+}
+
+impl UpscaleControl {
+    /// Create a control with cancellation disabled and no progress reporting.
+    pub fn none() -> Self {
+        Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+            on_progress: None,
+        }
+    }
+
+    /// Return `true` if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Report progress if enough time has passed since the last report (or
+    /// this is 100%). Returns `true` if a report was sent.
+    pub fn report_progress(
+        &self,
+        completed: usize,
+        total: usize,
+        last_report: &mut Option<std::time::Instant>,
+    ) -> bool {
+        let done = completed >= total;
+        let should_report = done
+            || last_report
+                .map(|t| t.elapsed() >= std::time::Duration::from_millis(100))
+                .unwrap_or(true);
+        if should_report {
+            if let Some(cb) = &self.on_progress {
+                cb(completed, total);
+            }
+            *last_report = Some(std::time::Instant::now());
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for UpscaleControl {
+    fn default() -> Self {
+        Self::none()
     }
 }
 
@@ -147,4 +219,21 @@ pub trait Upscaler: Send + Sync {
     /// Whether this upscaler has a fallback available (e.g. a CPU fallback for
     /// a GPU upscaler).
     fn fallback_available(&self) -> bool;
+
+    /// Upscale `image` according to `job`, honouring the shared cancellation
+    /// token and reporting actual completed/total progress via `control`.
+    ///
+    /// The default implementation delegates to [`upscale`] with a disabled
+    /// control, keeping the existing API stable. Override this in concrete
+    /// upscalers to add mid-job cancellation checkpoints and progress reports
+    /// without changing sampling coordinates.
+    fn upscale_with_control(
+        &self,
+        job: &UpscaleJob,
+        image: &DynamicImage,
+        control: UpscaleControl,
+    ) -> Result<DynamicImage, UpscaleError> {
+        let _ = control;
+        self.upscale(job, image)
+    }
 }

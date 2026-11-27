@@ -2,8 +2,8 @@
 
 | 文件資訊 | 內容 |
 | --- | --- |
-| 版本／建立／更新 | v1.1／2026-11-23／2026-11-23 |
-| 變更摘要 | v1.0 依 `main`（`cb55693`，v0.1.0 初版）建立：確認沒有資料庫，記錄實際的持久化資料（圖檔讀寫）與記憶體狀態。v1.1 新增 `settings.json` 設定檔持久化（見下方「持久化資料：設定檔」） |
+| 版本／建立／更新 | v1.4／2026-11-23／2026-11-27 |
+| 變更摘要 | v1.4 記錄取消與原子發布的先後及暫存清理。v1.3 記錄批次序號保留；v1.2 記錄同資料夾暫存、不覆寫發布與可信最近檔；v1.1 新增設定持久化。 |
 | 權威來源 | `src-tauri/Cargo.toml`（無資料庫相依）、`src-tauri/src/commands.rs`、`src-tauri/src/converter.rs`、`src-tauri/src/settings.rs`、`src/app.js` |
 
 ## 現況：沒有資料庫
@@ -24,11 +24,12 @@ flowchart LR
 | 檔案 | 產生者 | 位置與命名 | 覆寫行為 |
 | --- | --- | --- | --- |
 | 原圖 | 使用者 | 開檔對話框選取的任意路徑 | 程式只讀取 |
-| 放大結果 | `upscale` | 原圖同資料夾，`<原檔名>_upscaled.<原副檔名>` | 同名直接覆寫，不詢問 |
+| 放大結果 | `upscale`／`batch_upscale` | 原圖同資料夾或核准的輸出資料夾，套用輸出檔名設定 | 單張須明確確認才可取代；批次不覆寫 |
 | 匯出檔 | `export_image` | 存檔對話框選定路徑 | 由 Windows 存檔對話框詢問是否取代 |
 | 轉換檔 | `convert_image` | 存檔對話框選定路徑 | 同上 |
 
-- 寫檔使用 `File::create` 直接寫入目標路徑，沒有先寫暫存檔再更名；編碼中途失敗會留下不完整的檔案。
+- `converter.rs` 在目的資料夾獨佔建立暫存檔，完成編碼後才發布；未核准覆寫時用原子 no-replace，已核准才替換。放大／批次的取消和發布共用同一閘門：取消先到不改舊檔並清理暫存；發布先到則保留已完成檔。已用隔離 Windows 探針控制先後順序，不外推到目錄替換或原生 release GUI。
+- `src/app.js` 的 `resolveOutputPath` 保留批次項目的零起算序號：有 `{name}` 時沿用原有原檔名加序號；沒有 `{name}` 時在副檔名前加序號；若清理規則使用備用檔名，則為 `output_<序號>.<ext>`。單張不加序號。此規則不為磁碟上既有檔案自動改名，批次仍不得覆寫。
 - 放大結果在匯出後不會被刪除。
 
 ## 記憶體狀態
@@ -55,7 +56,7 @@ flowchart LR
     BE -- "JSON 檔案" --> CFG["Tauri app config dir<br/>settings.json"]
 ```
 
-|| 欄位 | 中文意義 | 允許值／預設 |
+| 欄位 | 中文意義 | 允許值／預設 |
 | --- | --- | --- | --- |
 | `backend` | 放大執行端 | `cpu`／`gpu`，預設 `cpu` |
 | `algorithm` | 放大演算法 | `Nearest`/`Bilinear`/`CatmullRom`/`Lanczos3`（CPU）或 `Fsr1_0`/`Anime4k`/`Nis`（GPU），預設 `Lanczos3` |
@@ -63,7 +64,7 @@ flowchart LR
 | `output_folder` | 自訂輸出資料夾 | 絕對路徑字串，或 `null`（寫入原圖同資料夾，現行行為） |
 | `keep_aspect_ratio` | 保持長寬比 | `true`/`false`，預設 `false` |
 | `filename_template` | 輸出檔名樣板 | 字串，預設 `{name}_upscaled_{scale}x.{ext}`；變數 `{name}`、`{scale}`、`{ext}` |
-| `recent_files` | 最近開啟檔案 | 最多 5 筆絕對路徑字串，新插頭舊擠尾，去重 |
+| `recent_files` | 最近開啟檔案 | `settings.json` 的舊值只供顯示。後端在 `recent.json` 維護最多 5 筆已授權路徑、最新優先、去重；拖放暫存不持久化 |
 
 - 寫入方式：先寫暫存檔（`settings.json.tmp`）再 `rename` 至 `settings.json`（atomic replace），避免寫至一半的損壞檔。
 - 路徑由後端自行構建（Tauri app config dir），前端不得傳入路徑；不進入 `AppState.check_write` 允許清單，為後端內部例外，已文件化。

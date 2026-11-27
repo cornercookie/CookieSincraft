@@ -21,6 +21,12 @@
     "allow-convert-image",
     "allow-load-image-from-base64",
     "allow-check-path-exists",
+    "allow-select-multiple-images",
+    "allow-select-output-folder",
+    "allow-read-settings",
+    "allow-write-settings",
+    "allow-add-recent-file",
+    "allow-batch-upscale",
     "allow-fs-cookiesincraft-temp"
   ]
 }

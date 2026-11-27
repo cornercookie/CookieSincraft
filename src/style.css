@@ -43,10 +43,11 @@ html {
 }
 
 body {
-    height: 100vh;
+    min-height: 100vh;
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: center;
+    overflow: auto;
     background: var(--bg);
 }
 
@@ -320,7 +321,8 @@ body {
     display: block;
 }
 
-.preview-img.hidden {
+.preview-img.hidden,
+.placeholder.hidden {
     display: none;
 }
 

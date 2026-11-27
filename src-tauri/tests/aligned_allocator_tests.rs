@@ -45,6 +45,8 @@ mod gpu;
 mod converter;
 #[path = "../src/commands.rs"]
 mod commands;
+#[path = "../src/settings.rs"]
+mod settings;
 
 use crate::commands::validate_dimensions;
 use crate::converter::Converter;

@@ -8,9 +8,11 @@ mod cpu;
 mod gpu;
 mod settings;
 mod upscaler;
+#[cfg(all(test, windows))]
+mod batch_test;
 
-use crate::commands::{AppState, batch_upscale, cancel_job, convert_image, export_image, load_image, select_image, select_multiple_images, select_output_folder, select_save_path, upscale};
-use crate::settings::{add_recent_file, read_settings, write_settings};
+use crate::commands::{AppState, add_recent_file, batch_upscale, cancel_job, check_path_exists, convert_image, export_image, load_image, load_image_from_base64, select_image, select_multiple_images, select_output_folder, select_save_path, upscale};
+use crate::settings::{read_settings, write_settings};
 
 fn main() {
     tauri::Builder::default()
@@ -26,6 +28,7 @@ fn main() {
             select_save_path,
             select_output_folder,
             load_image,
+            load_image_from_base64,
             upscale,
             cancel_job,
             export_image,
@@ -33,7 +36,8 @@ fn main() {
             read_settings,
             write_settings,
             add_recent_file,
-            batch_upscale
+            batch_upscale,
+            check_path_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

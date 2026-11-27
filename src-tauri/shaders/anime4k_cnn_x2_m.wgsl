@@ -21,11 +21,10 @@ struct Params {
     sharpness: f32, // not used in CNN, kept for API compatibility
 }
 
-@group(0) @binding(0) var<uniform> params: Params;
-
-@group(0) @binding(1) var source: texture_2d<f32>;
-@group(0) @binding(2) var smp: sampler;
-@group(0) @binding(3) var dest: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(0) var source: texture_2d<f32>;
+@group(0) @binding(1) var smp: sampler;
+@group(0) @binding(2) var dest: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(3) var<uniform> params: Params;
 
 fn luma(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.299, 0.587, 0.114));
